@@ -1,0 +1,34 @@
+---
+layout: ../../components/blog-post.astro
+title: "The Schnorr Protocol: An Interactive Guide"
+description: "A step-by-step interactive walkthrough of the Schnorr identification protocol."
+pubDate: "2026-02-15"
+---
+
+import SchnorrDemo from "../../components/schnorr-demo.astro";
+
+How do you prove you know a secret without revealing the secret itself? This is the core question behind **zero-knowledge proofs**, and the Schnorr identification protocol is one of the cleanest answers.
+
+Published by Claus-Peter Schnorr in 1989, the protocol lets a prover convince a verifier that they know a discrete logarithm — without leaking any information about it. It's elegant, efficient, and forms the foundation for Schnorr signatures, which underpin modern systems like EdDSA and multisig schemes.
+
+## How it works
+
+The protocol is a three-move interaction between a **Prover** (who knows a secret) and a **Verifier** (who wants to be convinced). Click through each step below to see the math play out with real values.
+
+<SchnorrDemo />
+
+## Why this works
+
+The key insight is that the verifier's random challenge **c** is chosen _after_ the prover commits to **t**. This means the prover can't cheat — they'd need to guess **c** in advance to forge a valid response without knowing **x**.
+
+The verification equation g<sup>s</sup> ≡ t · y<sup>c</sup> (mod p) works because:
+
+- g<sup>s</sup> = g<sup>r + cx</sup> = g<sup>r</sup> · g<sup>cx</sup> = t · y<sup>c</sup> (mod p)
+
+This is an example of a **sigma protocol** (Σ-protocol) — a three-round proof structure with commit → challenge → response. Sigma protocols are the building blocks of many modern zero-knowledge systems.
+
+## Beyond identification
+
+The Schnorr protocol as shown here is an _interactive_ proof — the verifier must participate in real-time. But using the **Fiat-Shamir heuristic**, we can replace the verifier's random challenge with a hash of the commitment, turning the protocol into a non-interactive proof. This is exactly how **Schnorr signatures** work.
+
+From this simple protocol, a direct line runs to EdDSA, MuSig, and the broader world of zero-knowledge cryptography. Understanding this three-step dance — commit, challenge, respond — is the first step to understanding them all.

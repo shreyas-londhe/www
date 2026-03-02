@@ -1,0 +1,445 @@
+---
+layout: ../../components/blog-post.astro
+title: "Spartan: Understanding Transparent SNARKs Without Trusted Setup"
+description: "A deep dive into how Spartan achieves transparent, general-purpose zkSNARKs using sum-check and polynomial commitments — no trusted setup required."
+pubDate: "2026-02-25"
+---
+
+## Introduction
+
+Spartan is a transparent proof system that achieves something previously thought to require tradeoffs: **no trusted setup** (no toxic waste), **general-purpose** (works for any NP statement via R1CS), and **sub-linear verification** (verifier doesn't read the entire statement). Zero-knowledge can be added on top.
+
+Before [Spartan (2019)](https://eprint.iacr.org/2019/550.pdf), you had to pick your poison:
+
+- **Groth16**: Fast verification, tiny proofs, but requires a trusted setup ceremony per circuit
+- **Bulletproofs**: Transparent, but verification scales linearly with circuit size
+- **STARKs**: Transparent and sub-linear verification, but large proofs and use a different constraint model (AIR, not R1CS)
+
+Spartan breaks this tradeoff by combining two ingredients:
+
+1. **Sum-check protocol** applied directly to R1CS constraints
+2. **Polynomial commitments** to achieve succinctness
+
+The result is the first transparent SNARK with sub-linear verification for arbitrary R1CS circuits.
+
+This article explains how Spartan works. We'll start with the basic protocol where the verifier runs in linear time, then show how polynomial commitments compress this into a SNARK with sub-linear verification. Zero-knowledge can be layered on top—we cover that briefly at the end. We treat the polynomial commitment scheme as a blackbox—Spartan works with any PCS that supports committing to multilinear polynomials and opening them at arbitrary points.
+
+**What you'll need**: Familiarity with R1CS, multilinear extensions (MLEs), and the sum-check protocol. We provide brief refreshers below, with links to deeper resources.
+
+**What we won't cover**: The SPARK protocol (Spartan's technique for committing to sparse matrices) gets its own article. We also skip security proofs and implementation details—the [paper](https://eprint.iacr.org/2019/550.pdf) and [code](https://github.com/microsoft/Spartan) are there for that.
+
+## Background
+
+### R1CS: The Language of Constraints
+
+R1CS (Rank-1 Constraint System) is a standard format for representing computations as a system of constraints. Most ZK proof systems that work with general computations use R1CS as their intermediate representation.
+
+An R1CS instance consists of three sparse matrices $A, B, C$ of size $m \times n$, where $m$ is the number of constraints and $n$ is the number of variables. A witness vector $z$ of length $n$ satisfies the R1CS if:
+
+$$A \cdot z \odot B \cdot z = C \cdot z$$
+
+where $\odot$ denotes element-wise (Hadamard) multiplication. In other words, for each constraint $i$:
+
+$$(A[i] \cdot z) \times (B[i] \cdot z) = C[i] \cdot z$$
+
+The witness vector $z$ has structure: $z = (1, x, w)$ where:
+
+- $w$: private witness (the secret the prover knows)
+- $1$: a constant term (always 1)
+- $x$: public inputs/outputs (known to both prover and verifier)
+
+The matrices $A, B, C$ are public—they define the computation. The prover's job is to convince the verifier that they know a $w$ such that the full $z$ satisfies all $m$ constraints.
+
+**Example**: The constraint $z_1 \times z_2 == z_3$ is encoded as a single row where $A$ picks out $z_1$, $B$ picks out $z_2$, and $C$ picks out $z_3$.
+
+> For a deeper dive into R1CS, see [RareSkills' R1CS explainer](https://rareskills.io/post/rank-1-constraint-system) or [Vitalik's QAP article](https://medium.com/@VitalikButerin/quadratic-arithmetic-programs-from-zero-to-hero-f6d558cea649).
+
+### Multilinear Extensions: Turning Data into Polynomials
+
+The key to Spartan (and many modern proof systems) is viewing data structures—vectors and matrices—as polynomials. This lets us use polynomial techniques like the sum-check protocol.
+
+**The idea**: Any function $f: \\{0,1\\}^n \to \mathbb{F}$ (mapping $n$-bit binary strings to field elements) has a unique **multilinear extension** $\tilde{f}: \mathbb{F}^n \to \mathbb{F}$ that:
+
+1. Agrees with $f$ on all boolean inputs: $\tilde{f}(b) = f(b)$ for all $b \in \\{0,1\\}^n$
+2. Is multilinear: linear in each variable individually
+
+**Vectors as polynomials**: A vector $v$ of length $2^n$ can be viewed as a function $f: \\{0,1\\}^n \to \mathbb{F}$ where $f(b) = v[\text{int}(b)]$ (interpreting the binary string as an index). Its MLE $\tilde{v}(x_1, \ldots, x_n)$ is a polynomial that "encodes" the entire vector.
+
+**Matrices as polynomials**: Similarly, an $m \times n$ matrix $M$ (with $m = 2^s$, $n = 2^t$) becomes a polynomial $\tilde{M}(x, y)$ in $s + t$ variables, where:
+
+- $x = (x_1, \ldots, x_s)$ indexes the row
+- $y = (y_1, \ldots, y_t)$ indexes the column
+- $\tilde{M}(x, y) = M[\text{int}(x), \text{int}(y)]$ for boolean inputs
+
+**Why this matters for Spartan**: The R1CS matrices $A$, $B$, $C$ and witness vector $z$ all become polynomials. The constraint equation $Az \circ Bz = Cz$ becomes a polynomial identity that we can check using sum-check.
+
+**The eq polynomial**: A building block you'll see often is $\widetilde{eq}(\tau, x)$, which evaluates to 1 when $x = \tau$ (on boolean inputs) and 0 otherwise. It's defined as:
+
+$$\widetilde{eq}(\tau, x) = \prod_{i=1}^{n} \left( \tau_i x_i + (1 - \tau_i)(1 - x_i) \right)$$
+
+This polynomial lets us "select" a specific point—crucial for combining multiple constraints into one.
+
+> For more on MLEs, see Chapter 3 of [Thaler's "Proofs, Arguments, and Zero-Knowledge"](https://people.cs.georgetown.edu/jthaler/ProofsArgsAndZK.pdf).
+
+### Sum-check Protocol: The Workhorse
+
+The sum-check protocol is the engine that powers Spartan. It lets a prover convince a verifier about the sum of a polynomial over the boolean hypercube—without the verifier evaluating all $2^n$ points.
+
+**The claim**: Given an $n$-variate polynomial $g(x_1, \ldots, x_n)$, the prover claims:
+
+$$H = \sum_{b \in \\{0,1\\}^n} g(b_1, \ldots, b_n)$$
+
+Naively, verifying this requires $2^n$ evaluations. Sum-check reduces it to a single evaluation at a random point.
+
+**The protocol** (interactive, $n$ rounds):
+
+0. **Round 0 (Setup)**:
+   - Prover computes the sum $H = \sum_{b \in \\{0,1\\}^n} g(b)$
+   - Prover sends claimed sum $H$ to verifier
+
+1. **Round 1**: Prover sends univariate polynomial $s_1(X_1) = \sum_{b_2, \ldots, b_n \in \\{0,1\\}} g(X_1, b_2, \ldots, b_n)$
+   - Verifier checks: $s_1(0) + s_1(1) = H$
+   - Verifier sends random challenge $r_1$
+
+2. **Round 2**: Prover sends $s_2(X_2) = \sum_{b_3, \ldots, b_n \in \\{0,1\\}} g(r_1, X_2, b_3, \ldots, b_n)$
+   - Verifier checks: $s_2(0) + s_2(1) = s_1(r_1)$
+   - Verifier sends random challenge $r_2$
+
+3. **... continue for all $n$ variables ...**
+
+4. **Final step**: After round $n$, verifier has random point $r = (r_1, \ldots, r_n)$
+   - Verifier checks: $s_n(r_n) = g(r_1, \ldots, r_n)$
+   - This requires **one evaluation** of $g$ at the random point
+
+**Why it works**: Each round "binds" one variable to a random value. A cheating prover would need to guess the verifier's random challenges to produce consistent polynomials—Schwartz-Zippel lemma makes this negligibly probable.
+
+**Cost**:
+
+- Prover: $O(2^n)$ work (must touch all terms)
+- Verifier: $O(n)$ field operations + one evaluation of $g$ at random point
+- Communication: $O(n)$ field elements (for multilinear $g$, each round sends a degree-1 polynomial)
+
+**The catch**: The verifier still needs to evaluate $g(r_1, \ldots, r_n)$ at the end. For some polynomials (like MLEs of sparse matrices), this can be expensive—this is where Spartan's cleverness comes in.
+
+> For a complete treatment, see Chapter 4 of [Thaler's book](https://people.cs.georgetown.edu/jthaler/ProofsArgsAndZK.pdf).
+
+## The Core Idea: R1CS as a Polynomial Equation
+
+Here's Spartan's key insight: R1CS satisfiability can be expressed as a polynomial equation, which we can verify using sum-check.
+
+Recall the R1CS condition: for a valid witness $z$, we need:
+
+$$(Az)_i \times (Bz)_i = (Cz)_i \quad \text{for all } i \in \\{1, \ldots, m\\}$$
+
+Let's rewrite this using MLEs. Define:
+
+- $\widetilde{A}(x, y)$, $\widetilde{B}(x, y)$, $\widetilde{C}(x, y)$: MLEs of matrices $A$, $B$, $C$
+- $\widetilde{z}(y)$: MLE of witness vector $z$
+
+The matrix-vector product $(Az)_i$ becomes a sum over the MLE:
+
+$$(Az)_i = \sum_{j} A_{i,j} \cdot z_j = \sum_{y \in \\{0,1\\}^{\log n}} \widetilde{A}(i, y) \cdot \widetilde{z}(y)$$
+
+Now, R1CS satisfaction means: for every row $x \in \\{0,1\\}^{\log m}$:
+
+$$\left(\sum_y \widetilde{A}(x, y) \cdot \widetilde{z}(y)\right) \times \left(\sum_y \widetilde{B}(x, y) \cdot \widetilde{z}(y)\right) = \sum_y \widetilde{C}(x, y) \cdot \widetilde{z}(y)$$
+
+**The problem**: We have $m$ equations to check (one per constraint). Checking each individually is too expensive.
+
+**The $\tau$ trick**: Instead of checking all $m$ equations, the verifier picks a random $\tau \in \mathbb{F}^{\log m}$ and we check a random linear combination:
+
+$$\sum_{x \in \\{0,1\\}^{\log m}} \widetilde{eq}(\tau, x) \cdot \left[ \left(\sum_y \widetilde{A}(x, y) \cdot \widetilde{z}(y)\right) \cdot \left(\sum_y \widetilde{B}(x, y) \cdot \widetilde{z}(y)\right) - \sum_y \widetilde{C}(x, y) \cdot \widetilde{z}(y) \right] = 0$$
+
+Here $\widetilde{eq}(\tau, x)$ acts as a "random weight" for each constraint. If the R1CS is satisfied, every term in the brackets is zero, so the sum is zero. If any constraint is violated, the sum is non-zero with high probability (by Schwartz-Zippel).
+
+**What we've achieved**: Checking $m$ constraints reduces to checking one sum equals zero—exactly what sum-check is designed for.
+
+The polynomial inside the sum has degree 3 overall (but still multilinear in $x$, one from $\widetilde{eq}$, and the product of two linear terms). This is the polynomial we'll apply sum-check to in Phase 1.
+
+## Phase 1: Checking All Constraints at Once
+
+We now have a sum to verify:
+
+$$\sum_{x \in \\{0,1\\}^s} \underbrace{\widetilde{eq}(\tau, x) \cdot \left[ A_z(x) \cdot B_z(x) - C_z(x) \right]}_{F(x)} = 0$$
+
+where $s = \log m$ and we define:
+
+- $A_z(x) = \sum_{y \in \\{0,1\\}^t} \widetilde{A}(x, y) \cdot \widetilde{z}(y)$ — the MLE of vector $Az$
+- $B_z(x)$ and $C_z(x)$ defined similarly
+- $t = \log n$ where $n$ is the witness length
+
+This is exactly a sum-check claim. The prover claims the sum is 0, and we run sum-check on the polynomial $F(x)$.
+
+**What happens during Phase 1:**
+
+1. Prover sends the claimed sum: $H = 0$
+2. Over $s$ rounds, prover and verifier run sum-check on $F(x)$
+3. Each round, verifier sends a random challenge $r_i$
+4. After $s$ rounds, all $x$ variables are bound to random values $r_x = (r_1, \ldots, r_s)$
+
+**At the end of Phase 1**, the verifier needs to check:
+
+$$F(r_x) = \widetilde{eq}(\tau, r_x) \cdot \left[ A_z(r_x) \cdot B_z(r_x) - C_z(r_x) \right]$$
+
+The verifier can compute $\widetilde{eq}(\tau, r_x)$ easily (it's a product of $s$ terms). But to compute $A_z(r_x)$, $B_z(r_x)$, and $C_z(r_x)$, they need:
+
+$$A_z(r_x) = \sum_{y \in \\{0,1\\}^t} \widetilde{A}(r_x, y) \cdot \widetilde{z}(y)$$
+
+This is another sum over the boolean hypercube—with $2^t$ terms!
+
+**The problem**: Computing $A_z(r_x)$ directly requires $O(n)$ work (summing over all $y$). If the verifier does this for $A$, $B$, and $C$, we're back to linear verification time.
+
+**The solution**: We run another sum-check (Phase 2) to reduce this to a single evaluation.
+
+## Phase 2: Ensuring Consistency
+
+At the end of Phase 1, the verifier needs $A_z(r_x)$, $B_z(r_x)$, and $C_z(r_x)$. The prover sends these as claims:
+
+$$v_A = A_z(r_x), \quad v_B = B_z(r_x), \quad v_C = C_z(r_x)$$
+
+But why should the verifier believe these values? We need to verify that:
+
+$$v_A = \sum_{y \in \\{0,1\\}^t} \widetilde{A}(r_x, y) \cdot \widetilde{z}(y)$$
+
+(and similarly for $v_B$ and $v_C$).
+
+**Combining three claims into one**: Instead of running three separate sum-checks, the verifier sends random challenges $\rho_A, \rho_B, \rho_C$ and we verify a single combined claim:
+
+$$\rho_A \cdot v_A + \rho_B \cdot v_B + \rho_C \cdot v_C = \sum_{y \in \\{0,1\\}^t} \left( \rho_A \cdot \widetilde{A}(r_x, y) + \rho_B \cdot \widetilde{B}(r_x, y) + \rho_C \cdot \widetilde{C}(r_x, y) \right) \cdot \widetilde{z}(y)$$
+
+This is another sum-check! Let's define:
+
+$$G(y) = \left( \rho_A \cdot \widetilde{A}(r_x, y) + \rho_B \cdot \widetilde{B}(r_x, y) + \rho_C \cdot \widetilde{C}(r_x, y) \right) \cdot \widetilde{z}(y)$$
+
+**What happens during Phase 2:**
+
+1. Verifier sends random $\rho_A, \rho_B, \rho_C$ to combine the three claims
+2. Prover and verifier run sum-check on $G(y)$ for $t$ rounds
+3. Each round, verifier sends random challenge $r'_j$
+4. After $t$ rounds, all $y$ variables are bound to $r_y = (r'_1, \ldots, r'_t)$
+
+**At the end of Phase 2**, the verifier needs to check:
+
+$$G(r_y) = \left( \rho_A \cdot \widetilde{A}(r_x, r_y) + \rho_B \cdot \widetilde{B}(r_x, r_y) + \rho_C \cdot \widetilde{C}(r_x, r_y) \right) \cdot \widetilde{z}(r_y)$$
+
+**What the verifier now needs:**
+
+1. $\widetilde{A}(r_x, r_y)$, $\widetilde{B}(r_x, r_y)$, $\widetilde{C}(r_x, r_y)$ — evaluations of the R1CS matrices at random point $(r_x, r_y)$
+2. $\widetilde{z}(r_y)$ — evaluation of the witness polynomial at random point $r_y$
+
+We've reduced everything to **four point evaluations**. This is the final check.
+
+## The Complete Protocol (Linear Verifier)
+
+Let's put the pieces together. Here's the full Spartan protocol with linear-time verification:
+
+**Setup:**
+
+- Public: R1CS matrices $A$, $B$, $C$ (size $m \times n$)
+- Public: input $x$
+- Prover's private input: witness $w$
+- Prover constructs: $z = (1, x, w)$
+
+**Protocol:**
+
+| Step | Prover | Verifier |
+| ---- | ------ | -------- |
+| 1 | | Sends random $\tau \in \mathbb{F}^{\log m}$ |
+| 2 | **Phase 1 Sum-check**: Proves $\sum_x \widetilde{eq}(\tau, x) \cdot [A_z(x) \cdot B_z(x) - C_z(x)] = 0$ | Participates in sum-check, obtains $r_x$ |
+| 3 | Sends claimed values $v_A, v_B, v_C$ | |
+| 4 | | Sends random $\rho_A, \rho_B, \rho_C$ |
+| 5 | **Phase 2 Sum-check**: Proves $\sum_y (\rho_A \widetilde{A} + \rho_B \widetilde{B} + \rho_C \widetilde{C})(r_x, y) \cdot \widetilde{z}(y) = \rho_A v_A + \rho_B v_B + \rho_C v_C$ | Participates in sum-check, obtains $r_y$ |
+| 6 | | **Final check** (see below) |
+
+**Final Check:**
+
+The verifier must verify $G(r_y)$ from Phase 2. This requires:
+
+1. **Matrix evaluations**: $\widetilde{A}(r_x, r_y)$, $\widetilde{B}(r_x, r_y)$, $\widetilde{C}(r_x, r_y)$
+2. **Witness evaluation**: $\widetilde{z}(r_y)$
+
+For the witness: the verifier can split $z = (1, x, w)$. The public part $(1, x)$ they know, so they can compute the contribution from public inputs. For the private part $w$, the prover sends $\widetilde{w}(r_y)$ and proves it's correct (using a polynomial commitment—more on this in the SNARK section).
+
+For the matrices: the verifier computes $\widetilde{A}(r_x, r_y)$, $\widetilde{B}(r_x, r_y)$, $\widetilde{C}(r_x, r_y)$ directly. This takes $O(N)$ time where $N$ is the number of non-zero entries in the matrices.
+
+**Making it non-interactive**: The protocol above is interactive—the verifier sends random challenges. In practice, we use the **Fiat-Shamir transform**: replace verifier's random challenges with hashes of the transcript so far. The Spartan implementation uses [merlin](https://docs.rs/crate/merlin/latest) for this. The result is a single proof message from prover to verifier.
+
+**Complexity:**
+
+| | Prover | Verifier | Proof Size |
+| --- | --- | --- | --- |
+| Time | $O(N)$ | $O(N)$ | $O(\log m + \log n)$ field elements |
+
+(where $N$ is the number of non-zero entries in the R1CS matrices)
+
+**The takeaway**: The proof is succinct (logarithmic size), but verification is linear. The verifier must read the entire R1CS instance to compute those matrix evaluations.
+
+This is not yet a SNARK (Succinct Non-interactive ARgument of Knowledge). The "succinct" in SNARK refers to sub-linear verification—which we don't have yet.
+
+Can we do better?
+
+## The Verifier's Bottleneck
+
+Yes. The bottleneck is clear: the verifier needs to compute $\widetilde{A}(r_x, r_y)$, $\widetilde{B}(r_x, r_y)$, and $\widetilde{C}(r_x, r_y)$.
+
+For a sparse matrix with $N$ non-zero entries, evaluating its MLE at a random point takes $O(N)$ time. The verifier must touch every non-zero entry to compute the evaluation. There's no shortcut—unless the verifier already knows the answer.
+
+**The insight**: What if the prover just _tells_ the verifier what $\widetilde{A}(r_x, r_y)$, $\widetilde{B}(r_x, r_y)$, $\widetilde{C}(r_x, r_y)$ are?
+
+The problem is trust. The prover could lie. We need a way for the prover to _commit_ to the matrices beforehand, and then _prove_ that the claimed evaluations are correct.
+
+This is exactly what polynomial commitment schemes do.
+
+## Achieving Sub-linear Verification
+
+The SNARK variant adds a **preprocessing phase** and uses **polynomial commitments** to eliminate the linear-time matrix evaluation.
+
+**Preprocessing (done once per circuit):**
+
+Before any proofs are generated, we commit to the R1CS matrices:
+
+1. Compute commitments: $C_A = \text{Commit}(\widetilde{A})$, $C_B = \text{Commit}(\widetilde{B})$, $C_C = \text{Commit}(\widetilde{C})$
+2. Publish these commitments as part of the public parameters
+
+This preprocessing takes $O(N)$ time where $N$ is the number of non-zero entries, but it's done only once.
+
+**Modified Protocol:**
+
+The SNARK protocol is almost identical to the basic protocol, with one key difference at the end:
+
+| Linear Verifier | Succinct Verifier (SNARK) |
+| --- | --- |
+| Verifier computes $\widetilde{A}(r_x, r_y)$ directly | Prover sends claimed value $e_A$ |
+| (takes $O(N)$ time) | Prover provides proof that $e_A = \widetilde{A}(r_x, r_y)$ via PCS |
+| | Verifier checks proof against commitment $C_A$ |
+
+**What the verifier needs from PCS:**
+
+The polynomial commitment scheme must support:
+
+- **Commit**: Given polynomial $p$, output commitment $C$
+- **Open**: Given point $r$, prove that $p(r) = v$
+- **Verify**: Given commitment $C$, point $r$, claimed value $v$, and proof $\pi$, check correctness
+
+The verification must be faster than evaluating the polynomial directly—otherwise there's no point.
+
+**The result:**
+
+| | Linear Verifier | Succinct Verifier |
+| --- | --- | --- |
+| Matrix evals | $O(N)$ — compute directly | $O(\log N)$ — verify PCS proof |
+| Witness eval | $O(n)$ — compute directly | $O(\log n)$ — verify PCS proof |
+| **Total** | $O(N + n)$ | $O(\log m + \log n + \log N)$ |
+
+The verifier now runs in **polylogarithmic time** in the circuit size. This is the "succinct" in SNARK.
+
+**Trade-off:**
+
+| | Linear Verifier | Succinct Verifier (SNARK) |
+| --- | --- | --- |
+| Preprocessing | None | $O(N)$ one-time |
+| Prover time | $O(N)$ | $O(N)$ (includes PCS proofs) |
+| Verifier time | $O(N)$ | $O(\log(m \cdot n \cdot N))$ |
+| Proof size | $O(\log m + \log n)$ | $O(\log m + \log n + \log N)$ |
+
+The linear-verifier variant is better when you have a small circuit or don't want preprocessing. The SNARK is better when verification cost matters (e.g., on-chain verification).
+
+## A Note on Zero-Knowledge
+
+Everything we've described so far is an _argument of knowledge_—the prover convinces the verifier that they know a valid witness. But it's not yet _zero-knowledge_: the proof might leak information about the witness.
+
+To make Spartan zero-knowledge, two modifications are needed:
+
+**1. Blind the witness commitment**
+
+When committing to the witness polynomial $\widetilde{z}$, add randomness:
+
+- Instead of $C_z = \text{Commit}(\widetilde{z})$
+- Use $C_z = \text{Commit}(\widetilde{z}; r)$ with random blinding factor $r$
+
+This ensures the commitment reveals nothing about $z$.
+
+**2. Blind the sum-check polynomials**
+
+During each round of sum-check, the prover sends a univariate polynomial. These polynomials depend on the witness and could leak information.
+
+The fix: add random "masking" polynomials that cancel out in expectation but hide the true values. The prover also provides zero-knowledge proofs (using sigma protocols) that the masked values are consistent.
+
+The Spartan paper and implementation use:
+
+- **Pedersen commitments** for hiding values
+- **Sigma protocols** (knowledge proofs, equality proofs, product proofs) for proving relationships between committed values
+
+We won't go deeper here—the key point is that zero-knowledge is achievable with standard techniques, adding only constant overhead to each sum-check round.
+
+> See Section 6 of the [Spartan paper](https://eprint.iacr.org/2019/550.pdf) for the full zero-knowledge construction.
+
+## What We Didn't Cover
+
+**SPARK: Committing to Sparse Matrices**
+
+We glossed over a critical detail: how do you efficiently commit to the sparse matrices $A$, $B$, $C$?
+
+Standard polynomial commitments work on dense polynomials. But R1CS matrices are sparse—they have $O(n)$ non-zero entries in an $m \times n$ matrix. Committing naively would require $O(m \cdot n)$ work.
+
+SPARK is Spartan's solution. It's a specialized commitment scheme for sparse multilinear polynomials that:
+
+- Commits in time $O(N)$ where $N$ is the number of non-zero entries
+- Opens at any point in time $O(N)$
+- Verification is $O(\log N)$
+
+SPARK uses memory-checking techniques and product arguments. It deserves its own article—coming soon.
+
+**Polynomial Commitment Schemes**
+
+We treated PCS as a blackbox. Spartan can work with different PCS backends:
+
+- **Hyrax-style** (used in the original implementation): Based on Pedersen commitments and inner product arguments
+- **KZG/Kate**: Requires trusted setup but gives constant-size proofs
+- **FRI-based**: Transparent, used in STARKs
+
+The choice of PCS affects proof size, verification time, and whether you need a trusted setup.
+
+**Security Analysis**
+
+We skipped all security proofs. The paper proves:
+
+- **Completeness**: Honest prover always convinces verifier
+- **Soundness**: Cheating prover fails with high probability (via Schwartz-Zippel)
+- **Zero-knowledge**: Proof reveals nothing beyond statement validity (via simulation)
+
+## Conclusion
+
+Spartan achieves transparent SNARKs through a clean insight: view R1CS as a polynomial identity and verify it using sum-check.
+
+**The core ideas:**
+
+1. Express R1CS satisfaction as $\sum_x \widetilde{eq}(\tau, x) \cdot [A_z(x) \cdot B_z(x) - C_z(x)] = 0$
+2. Apply sum-check twice: first to eliminate constraint variables, then to reduce to point evaluations
+3. Use polynomial commitments to make verification sub-linear
+
+**What makes Spartan significant:**
+
+- First transparent SNARK with sub-linear verification for general R1CS
+- No trusted setup (unlike Groth16)
+- Works with any PCS (modular design)
+- Efficient prover (no FFTs required)
+
+The techniques pioneered in Spartan—applying sum-check directly to R1CS, the two-phase structure—have influenced subsequent proof systems like HyperPlonk and others.
+
+If you want to go deeper:
+
+- Read the [paper](https://eprint.iacr.org/2019/550.pdf) for formal definitions and security proofs
+- Study the [implementation](https://github.com/microsoft/Spartan) to see how sum-check is realized in code
+- Look at `r1csproof.rs` for Phase 1 and Phase 2 implementation
+- Look at `sumcheck.rs` for the sum-check protocol details
+
+## References
+
+- **Spartan Paper**: Setty, S. (2020). "Spartan: Efficient and general-purpose zkSNARKs without trusted setup." CRYPTO 2020. [https://eprint.iacr.org/2019/550.pdf](https://eprint.iacr.org/2019/550.pdf)
+
+- **Implementation**: Microsoft Spartan. [https://github.com/microsoft/Spartan](https://github.com/microsoft/Spartan)
+
+- **Proofs, Arguments, and Zero-Knowledge**: Thaler, J. [https://people.cs.georgetown.edu/jthaler/ProofsArgsAndZK.pdf](https://people.cs.georgetown.edu/jthaler/ProofsArgsAndZK.pdf) — Excellent resource for sum-check and MLEs
+
+- **Vitalik's QAP Explainer**: [https://medium.com/@VitalikButerin/quadratic-arithmetic-programs-from-zero-to-hero-f6d558cea649](https://medium.com/@VitalikButerin/quadratic-arithmetic-programs-from-zero-to-hero-f6d558cea649) — Background on R1CS/QAPs

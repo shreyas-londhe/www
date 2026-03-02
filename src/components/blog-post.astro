@@ -6,6 +6,11 @@ const { frontmatter } = Astro.props;
 ---
 
 <Layout title={frontmatter.title} description={frontmatter.description}>
+  <link
+    slot="head"
+    rel="stylesheet"
+    href="https://cdn.jsdelivr.net/npm/katex@0.16.21/dist/katex.min.css"
+  />
   <main class="relative">
     <div class="mb-4 lg:absolute lg:-ml-36 lg:mb-0 lg:h-full">
       <a

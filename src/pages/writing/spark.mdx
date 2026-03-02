@@ -1,0 +1,264 @@
+---
+layout: ../../components/blog-post.astro
+title: "WTF is SPARK"
+description: "How SPARK makes Spartan practical — a sparse polynomial commitment scheme that scales with non-zero entries, not matrix dimensions."
+pubDate: "2026-03-02"
+---
+
+## What is SPARK?
+
+SPARK (Scalable Polynomial Argument of Knowledge) is a zkSNARK for efficiently committing to and proving evaluations of sparse polynomials and matrices. It was introduced as an optimization to the [Spartan protocol](/writing/spartan-protocol), specifically targeting scenarios where constraint system matrices are sparse.
+
+**In the zkSNARK pipeline:**
+
+- Spartan proves R1CS satisfaction: $(A \cdot z) \circ (B \cdot z) = C \cdot z$
+- This requires committing to and evaluating sparse matrices $A$, $B$, $C$
+- Standard polynomial commitments treat matrices densely
+- SPARK provides a commitment scheme optimized for sparsity, achieving $O(\text{nnz})$ complexity
+
+**Key property:** SPARK's prover and commitment costs scale with the number of non-zero entries (nnz), not the total matrix dimensions ($m \times n$).
+
+## Why SPARK?
+
+**The Dense Evaluation Bottleneck:**
+
+In standard approaches to proving R1CS, evaluating matrix MLEs at random points requires iterating over all positions:
+
+$$\tilde{M}(r_x, r_y) = \sum_{i=0}^{m-1} \sum_{j=0}^{n-1} M[i,j] \cdot \widetilde{eq}(i, r_x) \cdot \widetilde{eq}(j, r_y)$$
+
+- **Dense approach cost:** $O(m \cdot n)$
+- **Problem:** For sparse matrices, most $M[i,j] = 0$
+- **Example:** A $1024 \times 1024$ matrix with 4096 non-zeros processes 1M positions when only 4K are meaningful
+
+**SPARK's Improvement:**
+
+SPARK processes only the non-zero entries, trading dense iteration for sparse memory checking:
+
+- Iterate over nnz entries (not $m \times n$)
+- Use memory-checking protocol to prove correctness
+- Polynomial commitment overhead scales with padded nnz
+
+Use SPARK when matrices are sufficiently sparse that the memory-checking overhead is worthwhile compared to dense evaluation.
+
+## High-Level Intuition
+
+**The Core Insight:**
+
+Instead of iterating over all positions to compute the sum, SPARK treats the eq polynomial evaluations as a **virtual memory**:
+
+- **Addresses:** row and column indices
+- **Values:** $\widetilde{eq}(\text{row}, r_x)$ and $\widetilde{eq}(\text{col}, r_y)$
+- **Operations:** "read" the eq value for each non-zero entry's position
+
+**The Trade:**
+
+- Only process nnz entries (not $m \cdot n$)
+- Must prove we read the correct memory values
+- Use offline memory checking with timestamps
+
+**Memory Checking in One Sentence:**
+
+Prove that every memory read corresponds to a valid write by tracking access timestamps and using a grand product argument to verify consistency.
+
+**Protocol Flow Overview:**
+
+1. **Sumcheck:** Prove $\sum_{i} \text{val}[i] \cdot \text{memory\_row}[i] \cdot \text{memory\_col}[i] = \text{claimed\_value}$ over non-zeros
+2. **Memory Check:** Prove the memory\_row and memory\_col values are correct using timestamps
+3. **Grand Product Argument:** Verify read-write consistency through fingerprint products
+
+The magic: we've replaced $O(m \cdot n)$ dense iteration with $O(\text{nnz})$ sparse lookups + memory checking overhead.
+
+## Prerequisites & Notation
+
+**Assumed Knowledge:**
+
+- Multilinear Extensions (MLEs)
+- Sumcheck Protocol
+- Equality polynomial ($\widetilde{eq}$)
+- Polynomial commitments
+- Fiat-Shamir transform
+
+**Notation:**
+
+- R1CS: $(A \cdot z) \circ (B \cdot z) = C \cdot z$
+- Matrix dimensions: $m$ constraints $\times$ $n$ variables
+- nnz: number of non-zero entries
+- Coordinate format (COO): $(\text{row}, \text{col}, \text{val})$ tuples
+
+## The Core Problem: Sparse Matrix-Vector Multiplication
+
+**What We Need to Prove:**
+
+For a matrix $A$ evaluated at random point $(r_x, r_y)$:
+
+$$\widetilde{A}(r_x, r_y) = \sum_{i,j} A[i,j] \cdot \widetilde{eq}(i, r_x) \cdot \widetilde{eq}(j, r_y)$$
+
+**Why Dense Evaluation is Expensive:**
+
+- Requires iterating over all $m \times n$ positions
+- Most are zeros in sparse matrices
+- Prover cost: $O(m \cdot n)$ field operations
+
+**SPARK's Approach:**
+
+- Only process non-zero entries: $O(\text{nnz})$
+- Use memory-checking to prove correctness
+- Trade dense iteration for timestamp management
+
+## Offline Memory Checking Primitive
+
+### The Memory Checking Abstraction
+
+Think of a virtual memory with addresses and values. We define:
+
+- **Read-set (RS):** all memory reads performed
+- **Write-set (WS):** all memory writes performed
+- **Invariant:** every read must have a prior write
+
+### Fingerprinting Technique
+
+Each memory access is encoded as a fingerprint:
+
+$$\text{fingerprint} = (\text{address} \cdot \gamma^2 + \text{value} \cdot \gamma + \text{timestamp}) - \tau$$
+
+where $\gamma, \tau$ are random challenges from Fiat-Shamir. This encoding prevents forgery — a cheating prover would need to find collisions in the fingerprint polynomial, which happens with negligible probability by Schwartz-Zippel.
+
+### Product Argument
+
+The core claim:
+
+$$\prod \text{init\_fingerprints} \cdot \prod \text{WS\_fingerprints} = \prod \text{RS\_fingerprints} \cdot \prod \text{final\_fingerprints}$$
+
+- **Init:** all timestamps = 0 (memory starts fresh)
+- **Final:** timestamps = total access count per address
+- This equation proves read-write consistency
+
+## SPARK Protocol: Step-by-Step
+
+### Setup Phase
+
+1. Convert R1CS matrices to COO (coordinate) format
+2. Pad to power-of-2 length
+3. Compute timestamps for each access
+
+### Memory Structure
+
+- **Row memory:** addresses = row indices, values = $\widetilde{eq}(r_x, \cdot)$ evaluations
+- **Column memory:** addresses = column indices, values = $\widetilde{eq}(r_y, \cdot)$ evaluations
+
+### Timestamp Calculation
+
+- $\text{read\_row}[i]$ = number of times that row was accessed before entry $i$
+- $\text{read\_col}[i]$ = number of times that column was accessed before entry $i$
+- $\text{final\_row}[\text{addr}]$ = total times row addr was accessed
+- $\text{final\_col}[\text{addr}]$ = total times column addr was accessed
+
+### Main Protocol Flow
+
+**Phase 1 — Matrix Sumcheck:**
+
+Prove: $\sum_i \text{val}[i] \cdot \text{eq\_rx}[i] \cdot \text{eq\_ry}[i] = \text{claimed\_value}$
+
+This evaluates the sparse matrix at $(r_x, r_y)$.
+
+**Phase 2 — Row Memory Checking:**
+
+- Init-Final GPA: Prove row memory consistency
+- RS-WS GPA: Prove each read has a corresponding write
+
+**Phase 3 — Column Memory Checking:**
+
+- Init-Final GPA: Prove column memory consistency
+- RS-WS GPA: Prove each read has a corresponding write
+
+## Detailed Protocol Components
+
+### Matrix Sumcheck
+
+$$\sum_{i} \text{val}[i] \cdot \widetilde{eq}_{r_x}[i] \cdot \widetilde{eq}_{r_y}[i] = \text{claimed\_value}$$
+
+This works because the sparse representation (summing only over non-zeros) computes the same result as the dense sum. Implemented as a cubic sumcheck with Lasso optimization.
+
+### Grand Product Argument (GPA)
+
+The GPA proves product equality via multilinear extensions. It uses a **binary tree construction:**
+
+- Build layers: $[a, b, c, d] \to [ab, cd] \to [abcd]$
+- Prove each layer via sumcheck
+- Output: random evaluation point for final check
+
+### Init-Final Memory Check
+
+**Row side:**
+
+- Init fingerprints: $(\text{addr} \cdot \gamma^2 + \widetilde{eq}_{r_x}[\text{addr}] \cdot \gamma + 0) - \tau$
+- Final fingerprints: $(\text{addr} \cdot \gamma^2 + \widetilde{eq}_{r_x}[\text{addr}] \cdot \gamma + \text{final\_row}[\text{addr}]) - \tau$
+- GPA proves the $\prod \text{init} \cdot \prod \text{final}$ relationship
+
+**Column side:** similar, with $\widetilde{eq}_{r_y}$ and $\text{final\_col}$.
+
+### Read-Set / Write-Set Check
+
+- **Read-Set:** $(\text{row}[i] \cdot \gamma^2 + \widetilde{eq}_{r_x}[i] \cdot \gamma + \text{read\_row}[i]) - \tau$
+- **Write-Set:** $(\text{row}[i] \cdot \gamma^2 + \widetilde{eq}_{r_x}[i] \cdot \gamma + \text{read\_row}[i] + 1) - \tau$
+- **Invariant:** WS timestamp = RS timestamp + 1
+- GPA proves: $\prod \text{init} \cdot \prod \text{WS} = \prod \text{RS} \cdot \prod \text{final}$
+
+## The Equality Polynomial Trick
+
+### Why eq\_rx and eq\_ry?
+
+$\widetilde{eq}_{r_x}[\text{addr}]$ acts as a selector for row index $r_x$ — it's the eq polynomial evaluated over the boolean hypercube of row addresses. In the fingerprints, it serves as the "memory value" that we're reading.
+
+### Column Dimension Mismatch
+
+The column index space has $n+1$ dimensions vs the row's $n$ dimensions. This is handled by:
+
+$$\widetilde{eq}_{r_y} = \widetilde{eq}(\text{col}[1..], r_y) \cdot (1 - \text{col}[0])$$
+
+The first bit acts as an enable/disable selector.
+
+## Optimizations
+
+### Matrix Batching
+
+Instead of running SPARK separately for $A$, $B$, $C$, we combine them with a random linear combination $\beta$:
+
+$$A(r_x, r_y) + \beta \cdot B(r_x, r_y) + \beta^2 \cdot C(r_x, r_y)$$
+
+This proves all three matrix evaluations in a single sumcheck, saving two full sumcheck protocols.
+
+### Further Optimizations
+
+- Row-Column GPA batching with random linear combinations
+- Commitment merging strategies
+- Batched polynomial openings
+- Expected savings: 25–35% constraint reduction
+
+## Security
+
+**Soundness** relies on:
+
+- Schwartz-Zippel lemma for polynomial identity checks
+- Fingerprint collision probability (negligible in field size)
+- Fiat-Shamir security in the random oracle model
+
+**Why timestamps prevent cheating:**
+
+- Temporal ordering enforcement — each access gets a unique timestamp
+- No reuse without detection — replaying a read would create a timestamp gap
+- Product argument binding — any inconsistency breaks the product equality
+
+## Comparison with Alternatives
+
+| Approach | Prover Time | Verifier Time | Proof Size |
+| --- | --- | --- | --- |
+| Dense Evaluation | $O(m \cdot n)$ | $O(\log(m \cdot n))$ | $O(\log(m \cdot n))$ |
+| SPARK | $O(\text{nnz} \cdot \log(\text{nnz}))$ | $O(\log(\text{nnz}))$ | $O(\log(\text{nnz}))$ |
+| Lasso (lookup) | $O(\text{nnz})$ | $O(\log N)$ | $O(\log N)$ |
+
+## References
+
+- **Spartan Paper**: Setty, S. (2020). "Spartan: Efficient and general-purpose zkSNARKs without trusted setup." CRYPTO 2020. [https://eprint.iacr.org/2019/550.pdf](https://eprint.iacr.org/2019/550.pdf)
+- **Lasso Paper**: Setty, S. et al. (2023). "Unlocking the lookup singularity with Lasso." [https://eprint.iacr.org/2023/1216.pdf](https://eprint.iacr.org/2023/1216.pdf)
+- **WHIR Paper**: Arnon, G. et al. (2024). "WHIR: Reed-Solomon Proximity Testing with Super-Fast Verification." [https://eprint.iacr.org/2024/1586.pdf](https://eprint.iacr.org/2024/1586.pdf)

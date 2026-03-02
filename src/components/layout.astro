@@ -53,14 +53,18 @@ const resolvedOgImage =
         localStorage.setItem("theme", theme);
       }
 
+      document.querySelector('#theme-color')?.setAttribute('content', theme === 'dark' ? '#171717' : '#E5E5E5');
+
       document.addEventListener("astro:after-swap", () => {
         const stored = localStorage.getItem("theme");
-        if (stored === "dark") {
+        const isDark = stored === "dark";
+        if (isDark) {
           document.documentElement.classList.add("dark");
         } else {
           document.documentElement.classList.remove("dark");
         }
         document.documentElement.classList.add("skip-intro");
+        document.querySelector('#theme-color')?.setAttribute('content', isDark ? '#171717' : '#E5E5E5');
       });
     </script>
     <ClientRouter />
@@ -73,7 +77,7 @@ const resolvedOgImage =
       name="viewport"
       content="width=device-width, initial-scale=1, maximum-scale=2, user-scalable=yes"
     />
-    <meta name="theme-color" content="#E5E5E5" /><meta
+    <meta name="theme-color" content="#E5E5E5" id="theme-color" /><meta
       name="description"
       content={description}
     />
@@ -152,6 +156,7 @@ const resolvedOgImage =
         border: none;
       }
     </style>
+    <slot name="head" />
   </head>
   <body>
     <div class="flex justify-center">

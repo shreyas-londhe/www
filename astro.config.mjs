@@ -4,6 +4,8 @@ import vercel from "@astrojs/vercel";
 import { defineConfig } from "astro/config";
 import mdx from "@astrojs/mdx";
 import rehypeExternalLinks from "rehype-external-links";
+import remarkMath from "remark-math";
+import rehypeKatex from "rehype-katex";
 
 // https://astro.build/config
 export default defineConfig({
@@ -22,7 +24,9 @@ export default defineConfig({
       },
       defaultColor: false,
     },
+    remarkPlugins: [remarkMath],
     rehypePlugins: [
+      rehypeKatex,
       [
         rehypeExternalLinks,
         {
