@@ -15,8 +15,15 @@ async function loadGoogleFont(font: string, weight: number, text: string) {
 export const GET: APIRoute = async ({ request }) => {
   const url = new URL(request.url);
   const title = url.searchParams.get("title") || "Shreyas Londhe";
+  const isHome = title === "Shreyas Londhe";
 
-  const interSemibold = await loadGoogleFont("Inter", 600, title);
+  const displayText = isHome ? title : title;
+  const allText = isHome
+    ? `${title}Applied Cryptography Engineer`
+    : title;
+
+  const interSemibold = await loadGoogleFont("Inter", 600, allText);
+  const interRegular = await loadGoogleFont("Inter", 400, allText);
 
   return new ImageResponse(
     {
@@ -27,11 +34,8 @@ export const GET: APIRoute = async ({ request }) => {
           flexDirection: "column",
           width: "100%",
           height: "100%",
-          backgroundImage: "url(https://shreyaslondhe.xyz/og-blog-template.png)",
-          backgroundSize: "cover",
-          backgroundPosition: "center",
-          paddingLeft: "50px",
-          paddingBottom: "45px",
+          backgroundColor: "#fafafa",
+          padding: "60px",
           justifyContent: "flex-end",
         },
         children: [
@@ -39,13 +43,43 @@ export const GET: APIRoute = async ({ request }) => {
             type: "div",
             props: {
               style: {
-                fontSize: 64,
-                fontFamily: "Inter",
-                color: "#000000",
-                maxWidth: "1200px",
-                letterSpacing: "-0.04em",
+                display: "flex",
+                flexDirection: "column",
+                gap: isHome ? "12px" : "0px",
               },
-              children: title,
+              children: [
+                {
+                  type: "div",
+                  props: {
+                    style: {
+                      fontSize: isHome ? 72 : 64,
+                      fontFamily: "Inter",
+                      fontWeight: 600,
+                      color: "#171717",
+                      letterSpacing: "-0.04em",
+                      lineHeight: 1.1,
+                    },
+                    children: displayText,
+                  },
+                },
+                ...(isHome
+                  ? [
+                      {
+                        type: "div",
+                        props: {
+                          style: {
+                            fontSize: 32,
+                            fontFamily: "Inter",
+                            fontWeight: 400,
+                            color: "#737373",
+                            letterSpacing: "-0.02em",
+                          },
+                          children: "Applied Cryptography Engineer",
+                        },
+                      },
+                    ]
+                  : []),
+              ],
             },
           },
         ],
@@ -60,6 +94,12 @@ export const GET: APIRoute = async ({ request }) => {
           data: interSemibold,
           style: "normal",
           weight: 600,
+        },
+        {
+          name: "Inter",
+          data: interRegular,
+          style: "normal",
+          weight: 400,
         },
       ],
     },
