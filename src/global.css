@@ -7,8 +7,6 @@
 @custom-variant dark (&:where(.dark, .dark *));
 
 @theme {
-  --breakpoint-xs: 500px;
-
   --animate-intro: intro 0.3s forwards ease-in-out;
 
   @keyframes intro {
@@ -61,7 +59,7 @@
       "Inter",
       sans-serif;
     letter-spacing: -2%;
-    @apply bg-neutral-100 text-neutral-900 dark:bg-neutral-900 dark:text-neutral-100;
+    @apply bg-neutral-100 text-neutral-900 transition-colors duration-300 dark:bg-neutral-900 dark:text-neutral-100;
   }
 
   ::selection {
@@ -78,7 +76,12 @@
 
   a:not(.exclude) {
     text-decoration-style: wavy;
-    @apply underline decoration-neutral-300 dark:decoration-neutral-600;
+    @apply underline decoration-blue-400/50 dark:decoration-blue-500/40;
+  }
+
+  a:focus-visible,
+  button:focus-visible {
+    @apply rounded-sm outline-2 outline-offset-2 outline-blue-500;
   }
 }
 

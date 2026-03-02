@@ -1,4 +1,5 @@
 ---
+import { ClientRouter } from "astro:transitions";
 import "../global.css";
 import Footer from "./footer.astro";
 
@@ -8,6 +9,7 @@ const {
   ogImage,
 } = Astro.props;
 
+const canonicalUrl = new URL(Astro.url.pathname, "https://shreyaslondhe.xyz").href;
 const resolvedOgImage =
   ogImage ||
   `https://shreyaslondhe.xyz/api/og?title=${encodeURIComponent(title)}`;
@@ -50,9 +52,21 @@ const resolvedOgImage =
       if (typeof localStorage !== "undefined") {
         localStorage.setItem("theme", theme);
       }
+
+      document.addEventListener("astro:after-swap", () => {
+        const stored = localStorage.getItem("theme");
+        if (stored === "dark") {
+          document.documentElement.classList.add("dark");
+        } else {
+          document.documentElement.classList.remove("dark");
+        }
+        document.documentElement.classList.add("skip-intro");
+      });
     </script>
+    <ClientRouter />
     <meta charset="utf-8" />
     <link rel="sitemap" href="/sitemap-index.xml" />
+    <link rel="alternate" type="application/rss+xml" title="Shreyas Londhe" href="/rss.xml" />
     <meta name="generator" content={Astro.generator} />
     <title>{title}</title>
     <meta
@@ -81,13 +95,13 @@ const resolvedOgImage =
     />
     <meta name="category" content="technology" /><link
       rel="canonical"
-      href="https://shreyaslondhe.xyz"
+      href={canonicalUrl}
     /><meta
       property="og:title"
       content={title}
     />
     <meta property="og:description" content={description} />
-    <meta property="og:url" content="https://shreyaslondhe.xyz" /><meta
+    <meta property="og:url" content={canonicalUrl} /><meta
       property="og:site_name"
       content="Shreyas Londhe"
     />
@@ -142,7 +156,7 @@ const resolvedOgImage =
   <body>
     <div class="flex justify-center">
       <div
-        class="xs:w-[500px] mt-16 flex min-h-screen w-[90vw] flex-col justify-between"
+        class="mt-16 flex min-h-screen w-[90vw] max-w-xl flex-col justify-between md:max-w-2xl"
       >
         <slot />
         <Footer isHome={Astro.url.pathname === "/"} />

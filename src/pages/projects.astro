@@ -2,6 +2,23 @@
 import Layout from "../components/layout.astro";
 import IndexIcon from "../components/icons/Index.astro";
 import Link from "../components/icons/Link.astro";
+import { fetchStars, formatStars } from "../lib/github-stars";
+
+const repoMap: Record<string, string> = {
+  "zk-email-verify": "zkemail/zk-email-verify",
+  "zk-regex v2": "zkemail/zk-regex",
+  "jwt-tx-builder": "zkemail/email-tx-builder",
+  "ProveKit": "worldfnd/provekit",
+  "WHIR": "WizardOfMenlo/whir",
+};
+
+const starCounts = await Promise.all(
+  Object.entries(repoMap).map(async ([label, repo]) => {
+    const count = await fetchStars(repo);
+    return [label, count] as const;
+  }),
+);
+const liveStars = Object.fromEntries(starCounts);
 
 const projects = [
   {
@@ -10,7 +27,7 @@ const projects = [
     description:
       "Verify any text in any sent or received email, cryptographically — trusting only the sending mailserver.",
     role: "Core contributor @ ZkEmail",
-    stars: "420+",
+    stars: formatStars(liveStars["zk-email-verify"], "420+"),
   },
   {
     label: "zk-regex v2",
@@ -18,7 +35,7 @@ const projects = [
     description:
       "Regex-to-circuit compiler (Circom/Noir) with off-circuit NFA traversal and in-circuit proof.",
     role: "Author @ ZkEmail",
-    stars: "100+",
+    stars: formatStars(liveStars["zk-regex v2"], "100+"),
   },
   {
     label: "jwt-tx-builder",
@@ -26,14 +43,14 @@ const projects = [
     description:
       "Proving OAuth identity (e.g., Google Workspace membership) via JWT verification in ZK.",
     role: "Author @ ZkEmail",
-    stars: "80+",
+    stars: formatStars(liveStars["jwt-tx-builder"], "80+"),
   },
   {
     label: "ProveKit",
     href: "https://github.com/worldfnd/provekit",
     description: "Client-side zero-knowledge proving.",
     role: "Contributor @ World",
-    stars: "100+",
+    stars: formatStars(liveStars["ProveKit"], "100+"),
   },
   {
     label: "WHIR",
@@ -41,7 +58,7 @@ const projects = [
     description:
       "Reed–Solomon proximity testing with super-fast verification. Added batch prove/verify and enabled recursive verification by fixing transcript to constant length.",
     role: "Contributor",
-    stars: "180+",
+    stars: formatStars(liveStars["WHIR"], "180+"),
   },
   {
     label: "ZkSnap",
@@ -75,8 +92,8 @@ const projects = [
   description="Open source projects and contributions by Shreyas Londhe."
 >
   <main class="relative">
-    <div class="mb-4 md:absolute md:-ml-36 md:mb-0 md:h-full">
-      <a class="exclude flex items-center gap-x-1 md:sticky md:top-8" href="/"
+    <div class="mb-4 lg:absolute lg:-ml-36 lg:mb-0 lg:h-full">
+      <a class="exclude flex items-center gap-x-1 lg:sticky lg:top-8" href="/"
         ><IndexIcon /> Index
       </a>
     </div>
@@ -86,7 +103,7 @@ const projects = [
     <ul class="flex flex-col gap-y-6">
       {
         projects.map((project) => (
-          <li>
+          <li class="border-l-2 border-transparent pl-3 transition-colors hover:border-blue-400">
             <div class="flex items-center gap-x-2">
               {project.href ? (
                 <a
@@ -102,7 +119,7 @@ const projects = [
                 <span class="font-medium">{project.label}</span>
               )}
               {project.stars && (
-                <span class="rounded border border-neutral-300 px-1.5 py-0.5 text-xs text-neutral-500 dark:border-neutral-700 dark:text-neutral-400">
+                <span class="rounded border border-blue-200 px-1.5 py-0.5 text-xs text-blue-500 dark:border-blue-900 dark:text-blue-400">
                   {project.stars} ★
                 </span>
               )}

@@ -4,12 +4,23 @@
 
 <header>
   <div class="mb-6 flex animate-intro items-center justify-between">
-    <h1 class="font-semibold">Shreyas Londhe</h1>
+    <div class="flex items-center gap-x-3">
+      <img
+        src="https://avatars.githubusercontent.com/u/62744899?v=4"
+        alt="Shreyas Londhe"
+        width="40"
+        height="40"
+        class="rounded-full transition-shadow hover:ring-2 hover:ring-blue-400/50"
+        loading="eager"
+        draggable="false"
+      />
+      <h1 class="font-semibold">Shreyas Londhe</h1>
+    </div>
     <nav class="space-x-3">
-      <a href="/projects" class="exclude text-neutral-500 hover:underline"
+      <a href="/projects" class="exclude relative text-neutral-500 after:absolute after:bottom-0 after:left-0 after:h-px after:w-0 after:bg-current after:transition-[width] after:duration-200 hover:after:w-full"
         >Projects</a
       >
-      <a href="/writing" class="exclude text-neutral-500 hover:underline"
+      <a href="/writing" class="exclude relative text-neutral-500 after:absolute after:bottom-0 after:left-0 after:h-px after:w-0 after:bg-current after:transition-[width] after:duration-200 hover:after:w-full"
         >Writing</a
       >
     </nav>
@@ -23,11 +34,28 @@
         href="https://prove.email"
         target="_blank"
         rel="noreferrer">ZkEmail</a
-      >.
+      >. Based in Pune.
     </p>
-    <p class="animate-intro font-light opacity-0 [animation-delay:0.3s]">
-      Experienced in performance tuning, recursive verification pipelines, and
-      integrating real-world protocols into ZK circuits.
+    <p
+      id="greeting"
+      class="animate-intro font-light text-neutral-500 opacity-0 dark:text-neutral-400 [animation-delay:0.3s]"
+    >
+      Probably on a motorcycle somewhere when not writing circuits.
     </p>
   </div>
 </header>
+
+<script>
+  document.addEventListener("astro:page-load", () => {
+    const el = document.getElementById("greeting");
+    if (!el) return;
+    const lines = [
+      "Probably on a motorcycle somewhere when not writing circuits.",
+      "Debugging a witness generation bug at 2 AM, as one does.",
+      "If lost, check the nearest twisty mountain road.",
+      "Currently mass-producing proofs. Please hold.",
+      "Mass-producing SNARKs to mass-produce blocks to mass-produce dopamine.",
+    ];
+    el.textContent = lines[Math.floor(Math.random() * lines.length)]!;
+  });
+</script>
