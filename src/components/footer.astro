@@ -12,6 +12,7 @@ const { isHome = false } = Astro.props;
 
     const isDark = element.classList.contains("dark");
     localStorage.setItem("theme", isDark ? "dark" : "light");
+    document.querySelector('#theme-color')?.setAttribute('content', isDark ? '#171717' : '#E5E5E5');
   };
 
   document
