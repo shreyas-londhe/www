@@ -1,0 +1,111 @@
+@import "tailwindcss";
+@plugin "@tailwindcss/typography";
+
+@source "./components/**/*.astro";
+@source "./pages/**/*.{astro,mdx}";
+
+@custom-variant dark (&:where(.dark, .dark *));
+
+@theme {
+  --breakpoint-xs: 500px;
+
+  --animate-intro: intro 0.3s forwards ease-in-out;
+
+  @keyframes intro {
+    0% {
+      transform: translateY(10px);
+      opacity: 0;
+    }
+    100% {
+      transform: translateY(0px);
+      opacity: 1;
+    }
+  }
+}
+
+@font-face {
+  font-family: "Inter";
+  src: url("/inter/thin.woff2") format("woff2");
+  font-weight: normal;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "Inter";
+  src: url("/inter/regular.woff2") format("woff2");
+  font-weight: normal;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "Inter";
+  src: url("/inter/semibold.woff2") format("woff2");
+  font-weight: normal;
+  font-style: normal;
+  font-display: swap;
+}
+
+@layer base {
+  * {
+    box-sizing: border-box;
+    margin: 0;
+    padding: 0;
+  }
+
+  body {
+    font-family:
+      system-ui,
+      -apple-system,
+      "Inter",
+      sans-serif;
+    letter-spacing: -2%;
+    @apply bg-neutral-100 text-neutral-900 dark:bg-neutral-900 dark:text-neutral-100;
+  }
+
+  ::selection {
+    @apply bg-neutral-950 text-neutral-50;
+  }
+
+  .dark ::selection {
+    @apply bg-neutral-50 text-neutral-950;
+  }
+
+  img {
+    @apply select-none;
+  }
+
+  a:not(.exclude) {
+    text-decoration-style: wavy;
+    @apply underline decoration-neutral-300 dark:decoration-neutral-600;
+  }
+}
+
+@layer utilities {
+  html.skip-intro .animate-intro {
+    animation: none !important;
+    opacity: 1 !important;
+    transform: none !important;
+  }
+}
+
+.prose h2 {
+  font-size: 16px;
+  font-weight: 500;
+  margin-top: 1em;
+  margin-bottom: 1em;
+}
+
+.prose li {
+  margin-top: 0;
+  margin-bottom: 0;
+}
+
+.prose a {
+  font-weight: 400;
+}
+
+.prose ol > li::marker {
+  color: var(--tw-prose-body);
+}

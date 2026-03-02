@@ -1,0 +1,21 @@
+---
+import Layout from "../components/layout.astro";
+import Index from "../components/icons/Index.astro";
+---
+
+<Layout>
+  <main class="relative">
+    <div class="mb-4 md:absolute md:-ml-36 md:mb-0 md:h-full">
+      <a class="exclude flex items-center md:sticky md:top-8" href="/">
+        <Index />
+        Index
+      </a>
+    </div>
+    <header>
+      <h1 class="font-semibold">404—not found</h1>
+      <p class="mt-6 font-light leading-snug">
+        This page doesn't exist. <a href="/">Head back home</a>.
+      </p>
+    </header>
+  </main>
+</Layout>

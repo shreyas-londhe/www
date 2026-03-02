@@ -1,0 +1,121 @@
+---
+import Layout from "../components/layout.astro";
+import IndexIcon from "../components/icons/Index.astro";
+import Link from "../components/icons/Link.astro";
+
+const projects = [
+  {
+    label: "zk-email-verify",
+    href: "https://github.com/zkemail/zk-email-verify",
+    description:
+      "Verify any text in any sent or received email, cryptographically — trusting only the sending mailserver.",
+    role: "Core contributor @ ZkEmail",
+    stars: "420+",
+  },
+  {
+    label: "zk-regex v2",
+    href: "https://github.com/zkemail/zk-regex",
+    description:
+      "Regex-to-circuit compiler (Circom/Noir) with off-circuit NFA traversal and in-circuit proof.",
+    role: "Author @ ZkEmail",
+    stars: "100+",
+  },
+  {
+    label: "jwt-tx-builder",
+    href: "https://github.com/zkemail/email-tx-builder",
+    description:
+      "Proving OAuth identity (e.g., Google Workspace membership) via JWT verification in ZK.",
+    role: "Author @ ZkEmail",
+    stars: "80+",
+  },
+  {
+    label: "ProveKit",
+    href: "https://github.com/worldfnd/provekit",
+    description: "Client-side zero-knowledge proving.",
+    role: "Contributor @ World",
+    stars: "100+",
+  },
+  {
+    label: "WHIR",
+    href: "https://github.com/WizardOfMenlo/whir",
+    description:
+      "Reed–Solomon proximity testing with super-fast verification. Added batch prove/verify and enabled recursive verification by fixing transcript to constant length.",
+    role: "Contributor",
+    stars: "180+",
+  },
+  {
+    label: "ZkSnap",
+    href: null,
+    description:
+      "Privacy-preserving voting protocol using IVC-based proof aggregation and additive homomorphic encryption. Built full Halo2 circuit stack with client-side proof generation under 30s.",
+    role: "Author @ Aerius Labs",
+    stars: null,
+  },
+  {
+    label: "zkFOCIL",
+    href: null,
+    description:
+      "ZK circuit to anonymize Ethereum FOCIL includer identities, replacing public signatures with proofs to prevent coercion/legal targeting. Built using Barretenberg stdlib and Ultra Honk.",
+    role: "Ethereum Foundation grant",
+    stars: null,
+  },
+  {
+    label: "PLUME",
+    href: null,
+    description:
+      "Plume nullifier scheme + secp256k1 hash-to-curve in Halo2 for anonymous double-spend prevention. Passed PSE audit.",
+    role: "PSE grant",
+    stars: null,
+  },
+];
+---
+
+<Layout
+  title="Projects"
+  description="Open source projects and contributions by Shreyas Londhe."
+>
+  <main class="relative">
+    <div class="mb-4 md:absolute md:-ml-36 md:mb-0 md:h-full">
+      <a class="exclude flex items-center gap-x-1 md:sticky md:top-8" href="/"
+        ><IndexIcon /> Index
+      </a>
+    </div>
+    <header>
+      <h2 class="mb-6 font-semibold">Projects</h2>
+    </header>
+    <ul class="flex flex-col gap-y-6">
+      {
+        projects.map((project) => (
+          <li>
+            <div class="flex items-center gap-x-2">
+              {project.href ? (
+                <a
+                  href={project.href}
+                  rel="noreferrer"
+                  target="_blank"
+                  class="flex w-fit items-center font-medium"
+                >
+                  {project.label}
+                  <Link />
+                </a>
+              ) : (
+                <span class="font-medium">{project.label}</span>
+              )}
+              {project.stars && (
+                <span class="rounded border border-neutral-300 px-1.5 py-0.5 text-xs text-neutral-500 dark:border-neutral-700 dark:text-neutral-400">
+                  {project.stars} ★
+                </span>
+              )}
+            </div>
+            <p class="mt-0.5 text-sm text-neutral-500 dark:text-neutral-400">
+              {project.role}
+            </p>
+            <p class="mt-1 leading-snug font-light text-neutral-500 dark:text-neutral-400">
+              {project.description}
+            </p>
+          </li>
+        ))
+      }
+    </ul>
+  </main>
+</Layout>

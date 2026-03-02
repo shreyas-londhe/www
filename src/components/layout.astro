@@ -1,0 +1,159 @@
+---
+import "../global.css";
+import Footer from "./footer.astro";
+
+const {
+  title = "Shreyas Londhe",
+  description = "Applied cryptography engineer specializing in zero-knowledge proof systems.",
+  ogImage,
+} = Astro.props;
+
+const resolvedOgImage =
+  ogImage ||
+  (title !== "Shreyas Londhe"
+    ? `https://shreyaslondhe.xyz/api/og?title=${encodeURIComponent(title)}`
+    : "https://shreyaslondhe.xyz/og.png");
+---
+
+<html lang="en">
+  <head>
+    <script is:inline>
+      (() => {
+        const navEntry = performance.getEntriesByType("navigation")[0];
+        const isBackForward = navEntry && navEntry.type === "back_forward";
+        const fromSameSite =
+          document.referrer &&
+          new URL(document.referrer).origin === location.origin;
+
+        if (isBackForward || fromSameSite) {
+          document.documentElement.classList.add("skip-intro");
+        }
+      })();
+
+      const theme = (() => {
+        if (typeof localStorage !== "undefined") {
+          const stored = localStorage.getItem("theme");
+          if (stored === "dark" || stored === "light") {
+            return stored;
+          }
+        }
+        if (window.matchMedia("(prefers-color-scheme: dark)").matches) {
+          return "dark";
+        }
+        return "light";
+      })();
+
+      if (theme === "dark") {
+        document.documentElement.classList.add("dark");
+      } else {
+        document.documentElement.classList.remove("dark");
+      }
+
+      if (typeof localStorage !== "undefined") {
+        localStorage.setItem("theme", theme);
+      }
+    </script>
+    <meta charset="utf-8" />
+    <link rel="sitemap" href="/sitemap-index.xml" />
+    <meta name="generator" content={Astro.generator} />
+    <title>{title}</title>
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1, maximum-scale=2, user-scalable=yes"
+    />
+    <meta name="theme-color" content="#E5E5E5" /><meta
+      name="description"
+      content={description}
+    />
+    <link rel="author" href="https://shreyaslondhe.xyz" /><meta
+      name="author"
+      content="Shreyas Londhe"
+    />
+    <meta
+      name="keywords"
+      content="Shreyas Londhe,zero-knowledge proofs,applied cryptography,ZK,blockchain"
+    />
+    <meta name="creator" content="Shreyas Londhe" /><meta
+      name="publisher"
+      content="Shreyas Londhe"
+    />
+    <meta name="robots" content="index, follow, nocache" /><meta
+      name="googlebot"
+      content="index, follow, max-video-preview:-1, max-image-preview:large, max-snippet:-1"
+    />
+    <meta name="category" content="technology" /><link
+      rel="canonical"
+      href="https://shreyaslondhe.xyz"
+    /><meta
+      property="og:title"
+      content={title}
+    />
+    <meta property="og:description" content={description} />
+    <meta property="og:url" content="https://shreyaslondhe.xyz" /><meta
+      property="og:site_name"
+      content="Shreyas Londhe"
+    />
+    <meta property="og:locale" content="en-US" /><meta
+      property="og:image"
+      content={resolvedOgImage}
+    />
+    <meta property="og:image:width" content="1200" /><meta
+      property="og:image:height"
+      content="630"
+    />
+    <meta property="og:type" content="website" /><meta
+      name="twitter:card"
+      content="summary_large_image"
+    />
+    <meta name="twitter:site:id" content="shreyas_twts" /><meta
+      name="twitter:creator"
+      content="@shreyas_twts"
+    />
+    <meta name="twitter:creator:id" content="shreyas_twts" /><meta
+      name="twitter:title"
+      content={title}
+    />
+    <meta name="twitter:description" content={description} />
+    <meta name="twitter:image" content={resolvedOgImage} /><link
+      rel="icon"
+      href="/favicon.ico"
+    />
+    <link rel="apple-touch-icon" href="/icons/apple-touch-icon.png" /><meta
+      name="next-size-adjust"
+    />
+    <style is:global>
+      .astro-code,
+      .astro-code span {
+        color: var(--shiki-light);
+        background-color: transparent;
+      }
+      .astro-code {
+        background-color: #f5f5f5 !important;
+        border: 1px solid #e5e5e5;
+      }
+      .dark .astro-code,
+      .dark .astro-code span {
+        color: var(--shiki-dark);
+      }
+      .dark .astro-code {
+        background-color: var(--shiki-dark-bg) !important;
+        border: none;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="flex justify-center">
+      <div
+        class="xs:w-[500px] mt-16 flex min-h-screen w-[90vw] flex-col justify-between"
+      >
+        <slot />
+        <Footer isHome={Astro.url.pathname === "/"} />
+      </div>
+    </div>
+    <div
+      class="pointer-events-none fixed top-[-10px] z-40 h-12 w-screen bg-neutral-100 opacity-90 blur dark:bg-neutral-900"
+      aria-hidden="true"
+    >
+    </div>
+  </body>
+</html>

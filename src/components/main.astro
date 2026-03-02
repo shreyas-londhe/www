@@ -1,0 +1,102 @@
+---
+import Link from "./icons/Link.astro";
+
+const projects = [
+  {
+    label: "zk-email-verify",
+    href: "github.com/zkemail/zk-email-verify",
+    description:
+      "Verify any text in any sent or received email, cryptographically — trusting only the sending mailserver.",
+  },
+  {
+    label: "zk-regex v2",
+    href: "github.com/zkemail/zk-regex",
+    description:
+      "Regex-to-circuit compiler (Circom/Noir) with off-circuit NFA traversal and in-circuit proof.",
+  },
+  {
+    label: "WHIR",
+    href: "github.com/WizardOfMenlo/whir",
+    description:
+      "Reed–Solomon proximity testing with super-fast verification. Added batch prove/verify and recursive verification support.",
+  },
+  {
+    label: "ProveKit",
+    href: "github.com/worldfnd/provekit",
+    description: "Client-side zero-knowledge proving.",
+  },
+];
+
+const socials = [
+  {
+    label: "shreyas_londhe@outlook.com",
+    href: "mailto:shreyas_londhe@outlook.com",
+  },
+  {
+    label: "X",
+    href: "https://x.com/shreyas_twts",
+  },
+  {
+    label: "GitHub",
+    href: "https://github.com/shreyas-londhe",
+  },
+  {
+    label: "LinkedIn",
+    href: "https://www.linkedin.com/in/shreyaslondhe",
+  },
+  {
+    label: "Resume",
+    href: "/shreyas_resume.pdf",
+  },
+];
+---
+
+<main>
+  <section class="mt-12">
+    <h2
+      class="animate-intro mb-3 font-medium opacity-0 [animation-delay:0.35s]"
+    >
+      Featured Work
+    </h2>
+    <ul
+      class="animate-intro relative flex flex-col gap-y-4 opacity-0 [animation-delay:0.4s]"
+    >
+      {
+        projects.map((project) => (
+          <li>
+            <a
+              href={`https://${project.href}`}
+              rel="noreferrer"
+              target="_blank"
+              class="flex w-fit items-center"
+            >
+              {project.label}
+              <Link />
+            </a>
+            <p class="mt-1 leading-snug font-light text-neutral-500 dark:text-neutral-400">
+              {project.description}
+            </p>
+          </li>
+        ))
+      }
+    </ul>
+    <section class="animate-intro mt-12 opacity-0 [animation-delay:0.45s]">
+      <h2 class="mb-3 font-medium">Connect</h2>
+      <div class="flex flex-row flex-wrap items-center gap-x-1 gap-y-2">
+        {
+          socials.map((social) => (
+            <a
+              href={social.href}
+              target="_blank"
+              rel="noreferrer"
+              class="exclude flex items-center rounded-full bg-neutral-200 px-3 py-1 text-sm transition-colors select-none hover:bg-neutral-300 dark:bg-neutral-800 dark:hover:bg-neutral-700"
+            >
+              {social.label}
+              <Link />
+            </a>
+          ))
+        }
+      </div>
+    </section>
+  </section>
+</main>
