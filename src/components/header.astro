@@ -25,37 +25,14 @@
       >
     </nav>
   </div>
-  <div class="flex flex-col gap-y-3.5">
-    <p
-      class="animate-intro font-light leading-snug opacity-0 [animation-delay:0.2s]"
-    >
-      Applied cryptography engineer specializing in zero-knowledge proof
-      systems. Currently building production-grade ZK stacks at <a
-        href="https://prove.email"
-        target="_blank"
-        rel="noreferrer">ZkEmail</a
-      >. Based in Pune.
-    </p>
-    <p
-      id="greeting"
-      class="animate-intro font-light text-neutral-500 opacity-0 dark:text-neutral-400 [animation-delay:0.3s]"
-    >
-      Probably on a motorcycle somewhere when not writing circuits.
-    </p>
-  </div>
+  <p
+    class="animate-intro font-light leading-snug opacity-0 [animation-delay:0.2s]"
+  >
+    Applied cryptography engineer specializing in zero-knowledge proof
+    systems. Currently building production-grade ZK stacks at <a
+      href="https://prove.email"
+      target="_blank"
+      rel="noreferrer">ZkEmail</a
+    >. Based in India.
+  </p>
 </header>
-
-<script>
-  document.addEventListener("astro:page-load", () => {
-    const el = document.getElementById("greeting");
-    if (!el) return;
-    const lines = [
-      "Probably on a motorcycle somewhere when not writing circuits.",
-      "Debugging a witness generation bug at 2 AM, as one does.",
-      "If lost, check the nearest twisty mountain road.",
-      "Currently mass-producing proofs. Please hold.",
-      "Mass-producing SNARKs to mass-produce blocks to mass-produce dopamine.",
-    ];
-    el.textContent = lines[Math.floor(Math.random() * lines.length)]!;
-  });
-</script>
