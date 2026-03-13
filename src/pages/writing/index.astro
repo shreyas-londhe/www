@@ -8,13 +8,15 @@ const postModules = import.meta.glob<{
     description: string;
     pubDate: string;
     tags: string[];
+    externalUrl?: string;
   };
 }>("./*.mdx", { eager: true });
 
 const posts = Object.entries(postModules)
   .map(([path, post]) => ({
     ...post,
-    url: path.replace(".mdx", "").replace("./", "/writing/"),
+    url: post.frontmatter.externalUrl || path.replace(".mdx", "").replace("./", "/writing/"),
+    isExternal: !!post.frontmatter.externalUrl,
   }))
   .sort(
     (a, b) =>
@@ -59,6 +61,7 @@ const posts = Object.entries(postModules)
               <li>
                 <a
                   href={post.url}
+                  {...(post.isExternal ? { target: "_blank", rel: "noopener noreferrer" } : {})}
                   class="exclude block border-l-2 border-transparent pl-3 transition-colors hover:border-blue-400"
                 >
                   <span class="font-medium text-neutral-900 dark:text-neutral-100">
