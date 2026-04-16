@@ -1,0 +1,227 @@
+{
+  "type": "excalidraw",
+  "version": 2,
+  "source": "https://excalidraw.com",
+  "elements": [
+    {
+      "id": "title", "type": "text", "x": 150, "y": 10, "width": 400, "height": 30,
+      "text": "How a cheating prover gets caught",
+      "fontSize": 22, "fontFamily": 1, "textAlign": "center", "verticalAlign": "top",
+      "angle": 0, "strokeColor": "#1e1e1e", "backgroundColor": "transparent", "fillStyle": "solid",
+      "strokeWidth": 1, "roughness": 0, "opacity": 100, "roundness": null, "seed": 1,
+      "version": 1, "isDeleted": false, "boundElements": null, "updated": 1, "link": null, "locked": false, "groupIds": []
+    },
+
+    {
+      "id": "step1-box", "type": "rectangle", "x": 200, "y": 60, "width": 300, "height": 50,
+      "angle": 0, "strokeColor": "#1e1e1e", "backgroundColor": "#e9ecef", "fillStyle": "solid",
+      "strokeWidth": 2, "roughness": 1, "opacity": 40, "roundness": { "type": 3 }, "seed": 10,
+      "version": 1, "isDeleted": false, "boundElements": null, "updated": 1, "link": null, "locked": false, "groupIds": []
+    },
+    {
+      "id": "step1-text", "type": "text", "x": 220, "y": 72, "width": 260, "height": 25,
+      "text": "Verifier samples random column i",
+      "fontSize": 16, "fontFamily": 1, "textAlign": "center", "verticalAlign": "top",
+      "angle": 0, "strokeColor": "#1e1e1e", "backgroundColor": "transparent", "fillStyle": "solid",
+      "strokeWidth": 1, "roughness": 0, "opacity": 100, "roundness": null, "seed": 11,
+      "version": 1, "isDeleted": false, "boundElements": null, "updated": 1, "link": null, "locked": false, "groupIds": []
+    },
+
+    {
+      "id": "arrow1", "type": "arrow", "x": 350, "y": 113, "width": 0, "height": 35,
+      "angle": 0, "strokeColor": "#1e1e1e", "backgroundColor": "transparent", "fillStyle": "solid",
+      "strokeWidth": 2, "roughness": 1, "opacity": 100, "roundness": { "type": 2 }, "seed": 20,
+      "version": 1, "isDeleted": false, "boundElements": null, "updated": 1, "link": null, "locked": false, "groupIds": [],
+      "points": [[0,0],[0,35]], "lastCommittedPoint": [0,35],
+      "startBinding": null, "endBinding": null, "startArrowhead": null, "endArrowhead": "arrow"
+    },
+
+    {
+      "id": "diamond", "type": "diamond", "x": 220, "y": 155, "width": 260, "height": 80,
+      "angle": 0, "strokeColor": "#f08c00", "backgroundColor": "#fff3bf", "fillStyle": "solid",
+      "strokeWidth": 2, "roughness": 1, "opacity": 40, "roundness": { "type": 2 }, "seed": 30,
+      "version": 1, "isDeleted": false, "boundElements": null, "updated": 1, "link": null, "locked": false, "groupIds": []
+    },
+    {
+      "id": "diamond-text", "type": "text", "x": 270, "y": 175, "width": 160, "height": 40,
+      "text": "Is column i \"bad\"?\nr^T·gᵢ ≠ C(combo)[i]",
+      "fontSize": 13, "fontFamily": 1, "textAlign": "center", "verticalAlign": "top",
+      "angle": 0, "strokeColor": "#e8590c", "backgroundColor": "transparent", "fillStyle": "solid",
+      "strokeWidth": 1, "roughness": 0, "opacity": 100, "roundness": null, "seed": 31,
+      "version": 1, "isDeleted": false, "boundElements": null, "updated": 1, "link": null, "locked": false, "groupIds": []
+    },
+
+    {
+      "id": "diamond-prob", "type": "text", "x": 490, "y": 178, "width": 140, "height": 20,
+      "text": "prob ≥ δ/2",
+      "fontSize": 14, "fontFamily": 1, "textAlign": "left", "verticalAlign": "top",
+      "angle": 0, "strokeColor": "#e8590c", "backgroundColor": "transparent", "fillStyle": "solid",
+      "strokeWidth": 1, "roughness": 0, "opacity": 80, "roundness": null, "seed": 32,
+      "version": 1, "isDeleted": false, "boundElements": null, "updated": 1, "link": null, "locked": false, "groupIds": []
+    },
+    {
+      "id": "diamond-no", "type": "text", "x": 55, "y": 178, "width": 160, "height": 20,
+      "text": "No → miss this rep",
+      "fontSize": 13, "fontFamily": 1, "textAlign": "right", "verticalAlign": "top",
+      "angle": 0, "strokeColor": "#868e96", "backgroundColor": "transparent", "fillStyle": "solid",
+      "strokeWidth": 1, "roughness": 0, "opacity": 70, "roundness": null, "seed": 33,
+      "version": 1, "isDeleted": false, "boundElements": null, "updated": 1, "link": null, "locked": false, "groupIds": []
+    },
+
+    {
+      "id": "arrow-yes", "type": "arrow", "x": 350, "y": 238, "width": 0, "height": 35,
+      "angle": 0, "strokeColor": "#e8590c", "backgroundColor": "transparent", "fillStyle": "solid",
+      "strokeWidth": 2, "roughness": 1, "opacity": 100, "roundness": { "type": 2 }, "seed": 40,
+      "version": 1, "isDeleted": false, "boundElements": null, "updated": 1, "link": null, "locked": false, "groupIds": [],
+      "points": [[0,0],[0,35]], "lastCommittedPoint": [0,35],
+      "startBinding": null, "endBinding": null, "startArrowhead": null, "endArrowhead": "arrow"
+    },
+    {
+      "id": "yes-label", "type": "text", "x": 360, "y": 247, "width": 30, "height": 18,
+      "text": "Yes", "fontSize": 13, "fontFamily": 1, "textAlign": "left", "verticalAlign": "top",
+      "angle": 0, "strokeColor": "#e8590c", "backgroundColor": "transparent", "fillStyle": "solid",
+      "strokeWidth": 1, "roughness": 0, "opacity": 100, "roundness": null, "seed": 41,
+      "version": 1, "isDeleted": false, "boundElements": null, "updated": 1, "link": null, "locked": false, "groupIds": []
+    },
+
+    {
+      "id": "choice-box", "type": "rectangle", "x": 200, "y": 280, "width": 300, "height": 50,
+      "angle": 0, "strokeColor": "#1e1e1e", "backgroundColor": "#e9ecef", "fillStyle": "solid",
+      "strokeWidth": 2, "roughness": 1, "opacity": 30, "roundness": { "type": 3 }, "seed": 50,
+      "version": 1, "isDeleted": false, "boundElements": null, "updated": 1, "link": null, "locked": false, "groupIds": []
+    },
+    {
+      "id": "choice-text", "type": "text", "x": 215, "y": 289, "width": 270, "height": 30,
+      "text": "Prover must pick what to send\nas col_i. Two options:",
+      "fontSize": 13, "fontFamily": 1, "textAlign": "center", "verticalAlign": "top",
+      "angle": 0, "strokeColor": "#1e1e1e", "backgroundColor": "transparent", "fillStyle": "solid",
+      "strokeWidth": 1, "roughness": 0, "opacity": 100, "roundness": null, "seed": 51,
+      "version": 1, "isDeleted": false, "boundElements": null, "updated": 1, "link": null, "locked": false, "groupIds": []
+    },
+
+    {
+      "id": "arrow-left", "type": "arrow", "x": 300, "y": 333, "width": 100, "height": 45,
+      "angle": 0, "strokeColor": "#2f9e44", "backgroundColor": "transparent", "fillStyle": "solid",
+      "strokeWidth": 2, "roughness": 1, "opacity": 100, "roundness": { "type": 2 }, "seed": 60,
+      "version": 1, "isDeleted": false, "boundElements": null, "updated": 1, "link": null, "locked": false, "groupIds": [],
+      "points": [[0,0],[-100,45]], "lastCommittedPoint": [-100,45],
+      "startBinding": null, "endBinding": null, "startArrowhead": null, "endArrowhead": "arrow"
+    },
+    {
+      "id": "arrow-right", "type": "arrow", "x": 400, "y": 333, "width": 100, "height": 45,
+      "angle": 0, "strokeColor": "#e03131", "backgroundColor": "transparent", "fillStyle": "solid",
+      "strokeWidth": 2, "roughness": 1, "opacity": 100, "roundness": { "type": 2 }, "seed": 61,
+      "version": 1, "isDeleted": false, "boundElements": null, "updated": 1, "link": null, "locked": false, "groupIds": [],
+      "points": [[0,0],[100,45]], "lastCommittedPoint": [100,45],
+      "startBinding": null, "endBinding": null, "startArrowhead": null, "endArrowhead": "arrow"
+    },
+
+    {
+      "id": "optA-box", "type": "rectangle", "x": 40, "y": 385, "width": 260, "height": 140,
+      "angle": 0, "strokeColor": "#2f9e44", "backgroundColor": "#b2f2bb", "fillStyle": "solid",
+      "strokeWidth": 2, "roughness": 1, "opacity": 25, "roundness": { "type": 3 }, "seed": 70,
+      "version": 1, "isDeleted": false, "boundElements": null, "updated": 1, "link": null, "locked": false, "groupIds": []
+    },
+    {
+      "id": "optA-title", "type": "text", "x": 55, "y": 392, "width": 230, "height": 22,
+      "text": "Option A: col_i = g_i (truth)",
+      "fontSize": 16, "fontFamily": 1, "textAlign": "center", "verticalAlign": "top",
+      "angle": 0, "strokeColor": "#2f9e44", "backgroundColor": "transparent", "fillStyle": "solid",
+      "strokeWidth": 1, "roughness": 0, "opacity": 100, "roundness": null, "seed": 71,
+      "version": 1, "isDeleted": false, "boundElements": null, "updated": 1, "link": null, "locked": false, "groupIds": []
+    },
+    {
+      "id": "optA-body", "type": "text", "x": 55, "y": 420, "width": 230, "height": 60,
+      "text": "Check 1 tests:\nr^T · g_i == C(combo)[i]\nwhich is FALSE (bad column).",
+      "fontSize": 14, "fontFamily": 1, "textAlign": "left", "verticalAlign": "top",
+      "angle": 0, "strokeColor": "#1e1e1e", "backgroundColor": "transparent", "fillStyle": "solid",
+      "strokeWidth": 1, "roughness": 0, "opacity": 90, "roundness": null, "seed": 72,
+      "version": 1, "isDeleted": false, "boundElements": null, "updated": 1, "link": null, "locked": false, "groupIds": []
+    },
+    {
+      "id": "optA-result", "type": "text", "x": 55, "y": 490, "width": 230, "height": 25,
+      "text": "→ CAUGHT (deterministic)",
+      "fontSize": 16, "fontFamily": 1, "textAlign": "center", "verticalAlign": "top",
+      "angle": 0, "strokeColor": "#2f9e44", "backgroundColor": "transparent", "fillStyle": "solid",
+      "strokeWidth": 1, "roughness": 0, "opacity": 100, "roundness": null, "seed": 73,
+      "version": 1, "isDeleted": false, "boundElements": null, "updated": 1, "link": null, "locked": false, "groupIds": []
+    },
+
+    {
+      "id": "optB-box", "type": "rectangle", "x": 400, "y": 385, "width": 260, "height": 140,
+      "angle": 0, "strokeColor": "#e03131", "backgroundColor": "#ffc9c9", "fillStyle": "solid",
+      "strokeWidth": 2, "roughness": 1, "opacity": 25, "roundness": { "type": 3 }, "seed": 80,
+      "version": 1, "isDeleted": false, "boundElements": null, "updated": 1, "link": null, "locked": false, "groupIds": []
+    },
+    {
+      "id": "optB-title", "type": "text", "x": 415, "y": 392, "width": 230, "height": 22,
+      "text": "Option B: col_i ≠ g_i (lie)",
+      "fontSize": 16, "fontFamily": 1, "textAlign": "center", "verticalAlign": "top",
+      "angle": 0, "strokeColor": "#e03131", "backgroundColor": "transparent", "fillStyle": "solid",
+      "strokeWidth": 1, "roughness": 0, "opacity": 100, "roundness": null, "seed": 81,
+      "version": 1, "isDeleted": false, "boundElements": null, "updated": 1, "link": null, "locked": false, "groupIds": []
+    },
+    {
+      "id": "optB-body", "type": "text", "x": 415, "y": 420, "width": 230, "height": 60,
+      "text": "Check 1 may pass, BUT\nC(col_i) ≠ i-th col of F.\nCheck 2 catches at random j.",
+      "fontSize": 14, "fontFamily": 1, "textAlign": "left", "verticalAlign": "top",
+      "angle": 0, "strokeColor": "#1e1e1e", "backgroundColor": "transparent", "fillStyle": "solid",
+      "strokeWidth": 1, "roughness": 0, "opacity": 90, "roundness": null, "seed": 82,
+      "version": 1, "isDeleted": false, "boundElements": null, "updated": 1, "link": null, "locked": false, "groupIds": []
+    },
+    {
+      "id": "optB-result", "type": "text", "x": 415, "y": 490, "width": 230, "height": 25,
+      "text": "→ CAUGHT (prob ≥ δ/2)",
+      "fontSize": 16, "fontFamily": 1, "textAlign": "center", "verticalAlign": "top",
+      "angle": 0, "strokeColor": "#e03131", "backgroundColor": "transparent", "fillStyle": "solid",
+      "strokeWidth": 1, "roughness": 0, "opacity": 100, "roundness": null, "seed": 83,
+      "version": 1, "isDeleted": false, "boundElements": null, "updated": 1, "link": null, "locked": false, "groupIds": []
+    },
+
+    {
+      "id": "arrow-merge-l", "type": "arrow", "x": 170, "y": 528, "width": 130, "height": 40,
+      "angle": 0, "strokeColor": "#1e1e1e", "backgroundColor": "transparent", "fillStyle": "solid",
+      "strokeWidth": 2, "roughness": 1, "opacity": 60, "roundness": { "type": 2 }, "seed": 90,
+      "version": 1, "isDeleted": false, "boundElements": null, "updated": 1, "link": null, "locked": false, "groupIds": [],
+      "points": [[0,0],[130,40]], "lastCommittedPoint": [130,40],
+      "startBinding": null, "endBinding": null, "startArrowhead": null, "endArrowhead": "arrow"
+    },
+    {
+      "id": "arrow-merge-r", "type": "arrow", "x": 530, "y": 528, "width": 130, "height": 40,
+      "angle": 0, "strokeColor": "#1e1e1e", "backgroundColor": "transparent", "fillStyle": "solid",
+      "strokeWidth": 2, "roughness": 1, "opacity": 60, "roundness": { "type": 2 }, "seed": 91,
+      "version": 1, "isDeleted": false, "boundElements": null, "updated": 1, "link": null, "locked": false, "groupIds": [],
+      "points": [[0,0],[-130,40]], "lastCommittedPoint": [-130,40],
+      "startBinding": null, "endBinding": null, "startArrowhead": null, "endArrowhead": "arrow"
+    },
+
+    {
+      "id": "result-box", "type": "rectangle", "x": 180, "y": 575, "width": 340, "height": 65,
+      "angle": 0, "strokeColor": "#1e1e1e", "backgroundColor": "#d0bfff", "fillStyle": "solid",
+      "strokeWidth": 2, "roughness": 1, "opacity": 35, "roundness": { "type": 3 }, "seed": 100,
+      "version": 1, "isDeleted": false, "boundElements": null, "updated": 1, "link": null, "locked": false, "groupIds": []
+    },
+    {
+      "id": "result-text", "type": "text", "x": 200, "y": 582, "width": 300, "height": 50,
+      "text": "Combined: each repetition catches\na cheat with probability ≥ (δ/2)²",
+      "fontSize": 17, "fontFamily": 1, "textAlign": "center", "verticalAlign": "top",
+      "angle": 0, "strokeColor": "#1e1e1e", "backgroundColor": "transparent", "fillStyle": "solid",
+      "strokeWidth": 1, "roughness": 0, "opacity": 100, "roundness": null, "seed": 101,
+      "version": 1, "isDeleted": false, "boundElements": null, "updated": 1, "link": null, "locked": false, "groupIds": []
+    },
+
+    {
+      "id": "repeat-text", "type": "text", "x": 190, "y": 650, "width": 320, "height": 25,
+      "text": "Repeat ~4λ/δ² times → soundness 2^(-λ)",
+      "fontSize": 15, "fontFamily": 1, "textAlign": "center", "verticalAlign": "top",
+      "angle": 0, "strokeColor": "#6741d9", "backgroundColor": "transparent", "fillStyle": "solid",
+      "strokeWidth": 1, "roughness": 0, "opacity": 80, "roundness": null, "seed": 110,
+      "version": 1, "isDeleted": false, "boundElements": null, "updated": 1, "link": null, "locked": false, "groupIds": []
+    }
+  ],
+  "appState": {
+    "gridSize": null,
+    "viewBackgroundColor": "#ffffff"
+  },
+  "files": {}
+}

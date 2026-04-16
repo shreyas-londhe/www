@@ -1,0 +1,476 @@
+---
+layout: ../../components/blog-post.astro
+title: "TensorSwitch I: Tensor Codes and Code Switching"
+description: "Part 1 of a walkthrough of TensorSwitch, a hash-based PCS that cracks two long-standing bottlenecks in hash-based SNARGs. This part builds the core protocol in an idealized linear query model."
+pubDate: "2026-04-15"
+tags: ["zero-knowledge", "snarks", "hash-based-pcs"]
+---
+
+## What problem are we solving?
+
+If you're building a SNARK or STARK, sooner or later you're going to bump into a **polynomial commitment scheme** (PCS). A PCS is the subsystem that lets the prover "lock in" a polynomial up front, then later convince the verifier that the polynomial takes some specific value at some specific point. It's usually where most of the prover time goes, and it's usually where most of the proof-size bytes live.
+
+So when you want a SNARK that's faster, smaller, or lighter on the verifier, you're usually asking: can we build a better PCS?
+
+**TensorSwitch** (Bünz, Fenzi, Rothblum, Wang — November 2025) is a new hash-based PCS for multilinear polynomials that cracks two long-standing bottlenecks at once:
+
+- **Smaller proofs.** Existing linear-prover PCSs produce megabyte-scale proofs. Brakedown, for instance, outputs a roughly 1.5 MB proof for a polynomial with $2^{25}$ coefficients. TensorSwitch gets the same proof down to a few thousand Merkle paths — close to the theoretical floor for any hash-based PCS whose commitment is just "encode the polynomial with a code and Merkle-hash the codeword."
+- **Less extension-field work.** To get good soundness on small "fast" base fields like Goldilocks or BabyBear, verifier randomness has to come from a bigger extension field (typically a degree-4 extension, so each element is $4\times$ the size and operations on it are noticeably more expensive). Every prior polylog-proof hash-based PCS — FRI, WHIR, Blaze — ends up doing linear-sized work in that expensive extension field. TensorSwitch cuts this to roughly $\sqrt{\lambda n}$.
+
+It also keeps a fast, linear-time base-field prover (about $6n$ base-field multiplications for opening) and produces only $O(\log \log n)$ Merkle tree commitments — compared to $\Omega(\log n)$ for FRI, WHIR, and Blaze.
+
+### A glossary before we touch the table
+
+Before we compare TensorSwitch to prior work, four symbols are going to appear over and over. It's worth getting them into your head up front, because later sections build on them without reintroduction:
+
+- **$n$** — the size of the polynomial. Number of coefficients, or equivalently $2^m$ if you're committing to a multilinear polynomial with $m$ variables.
+- **$\lambda$** — the **security parameter**. The number of bits of security we want: a cheating prover should be caught with probability at least $1 - 2^{-\lambda}$. In practice $\lambda = 100$ or $128$.
+- **$\delta$** — a property of the error-correcting **code** we'll encode our polynomial with. Codes add redundancy, and $\delta$ (the code's _minimum distance_) measures how robust that redundancy is: any two distinct codewords differ in at least a $\delta$-fraction of their positions. Bigger is better. Reed–Solomon at rate $1/2$ gives $\delta = 1/2$ — any two codewords disagree in at least half their positions.
+- **$\rho$** — the **rate** of the code. If the code turns $k$-symbol messages into $\ell$-symbol codewords, the rate is $k/\ell$. A rate-$1/2$ code doubles the message's length on the wire; a rate-$1/4$ code quadruples it. Lower rate means more redundancy (and usually bigger $\delta$), but more prover work to encode.
+
+Now the headline table. Each entry is "up to lower-order terms":
+
+|                       | Commit time                           | Opening time             | Proof size                              | Ext-field encode     |
+| --------------------- | ------------------------------------- | ------------------------ | --------------------------------------- | -------------------- |
+| Brakedown             | $25.5n\ \mathbb F$                    | $O(n)\ \mathbb F$        | $O(\sqrt{\lambda n})\ \mathbb F$        | $0$                  |
+| Blaze                 | $8n\ \mathbb F^+$                     | $O(n)\ \mathbb F$        | $O_\delta(\lambda\log^2 n)$ MP          | $\tilde\Omega(n)$    |
+| FRI                   | $\tfrac{\log n}{\rho} n\ \mathbb F$   | $O(n)\ \mathbb F$        | $O_\delta(\lambda\log n)$ MP            | $\tilde\Omega(n)$    |
+| WHIR                  | $\tfrac{\log n}{\rho} n\ \mathbb F$   | $\tilde O(n)\ \mathbb F$ | $O_\delta(\lambda\log\log n)$ MP        | $\tilde\Omega(n)$    |
+| **TensorSwitch (RS)** | $\tfrac{\log n}{\rho^2} n\ \mathbb F$ | $6n\ \mathbb F$          | $\tfrac{\lambda}{-\log(1-\delta^2)}$ MP | $(\lambda n)^{0.51}$ |
+
+($\mathbb F$ = base-field multiplications, $\mathbb F^+$ = base-field additions, MP = Merkle paths.)
+
+This article is **Part 1** of a two-part walkthrough. In Part 1 we build the core protocol — but we cheat a little: we work in an idealized "linear query model" where the verifier can ask about arbitrary weighted sums of a prover's oracle in a single step. I'll unpack what that means when we get there. **Part 2** will explain how to compile the linear-query protocol back into a real PCS where the verifier only makes point queries (Merkle reads), walk through the security story, and cover the full efficiency analysis.
+
+**Prerequisites.** You should know what a polynomial commitment is, roughly what a multilinear polynomial is, and be comfortable with finite-field linear algebra. Everything else — linear codes, tensor codes, the IOPCS abstraction, the linear query model — we'll build from scratch.
+
+## The Two Walls Prior PCSs Hit
+
+Let me be concrete about what "prior work got stuck" actually looks like.
+
+### Wall 1: Megabyte-scale proofs from column reads
+
+Ligero-style PCSs — Brakedown is the canonical fast-prover example — work in roughly the following way. Take the polynomial's $n$-long coefficient vector and reshape it as a $k \times k$ matrix $M$, where $k = \sqrt n$. Encode each row of $M$ with a linear code $C$, producing a $k \times \ell$ matrix $U$ whose rows are codewords of $C$. Merkle-commit to the _columns_ of $U$.
+
+To check evaluations, the verifier samples random columns of the committed matrix and checks that they're consistent with some random linear combination of the rows. The trouble is that each such check requires the verifier to learn a whole column — all $k = \sqrt n$ entries — because the random linear combination depends on every row. In the real protocol that's $\sqrt n$ Merkle path opens per spot check. With enough spot checks for $\lambda$ bits of security, you end up sending hundreds of thousands of Merkle paths.
+
+Concretely: for $n = 2^{25}$ and $\lambda = 128$, the Brakedown proof is around 1.5 MB. Big enough that in practice people "wrap" it in an outer group-based SNARG (like Groth16) to compress it — which kills post-quantum security, adds latency, and typically drags in a trusted setup.
+
+FRI and WHIR get around this wall by using a technique called **folding**: they recursively halve the size of the codeword by mixing adjacent pairs of entries with a verifier-supplied challenge. After $\log n$ rounds of folding, the codeword is tiny, so the proof only needs $O(\lambda \log n)$ or $O(\lambda \log \log n)$ Merkle paths. That fixes proof size, but it introduces the second wall.
+
+### Wall 2: Extension-field encoding
+
+Proof systems like to compute over small fields — Goldilocks ($p \approx 2^{64}$), BabyBear ($p \approx 2^{31}$) — because their elements fit in a CPU word and arithmetic is fast.
+
+The problem: a single verifier challenge out of a $2^{31}$ field only gives you 31 bits of soundness, nowhere near enough. So the verifier samples challenges from a bigger _extension_ field — usually a degree-4 extension, which gives you $2^{124}$ worth of soundness from one challenge.
+
+The gotcha: every time the verifier's randomness touches the prover's data, the prover has to compute in that extension field. Extension-field elements are $4\times$ the size of base-field elements, so storing them costs $4\times$ more memory, hashing them into a Merkle tree costs more hash input, and multiplying two of them is several times more expensive than a base-field multiplication (depending on the algorithm).
+
+FRI and WHIR's folding reductions do exactly this "mix challenge with data" operation in every round. After one round of folding, the entire codeword lives in the extension field. So FRI and WHIR end up encoding and committing to $\tilde\Omega(n)$ extension-field data — often the single biggest cost of proving.
+
+Blaze uses a different trick called **code switching** (due to Ron-Zewi and Rothblum, 2024) to get polylog proofs without quasilinear folding, and it still runs in linear time over the base field. But it ends up paying the same extension-field bill as FRI/WHIR, just via a different mechanism.
+
+### What we want
+
+For a $\lambda$-secure PCS over a size-$n$ polynomial, three cost targets matter:
+
+1. **Commit time** linear in $n$. You have to touch every coefficient — that's the floor — and we want to stay close to it.
+2. **Proof size** close to $\lambda/\delta$ Merkle paths. That's the theoretical floor: you need at least $\lambda/\delta$ queries to distinguish two valid codewords with soundness $2^{-\lambda}$.
+3. **Extension-field work** much smaller than $n$. Ideally $(\lambda n)^{0.5+o(1)}$ rather than $\tilde\Omega(n)$.
+
+TensorSwitch is within small constant factors of all three.
+
+## Background
+
+Three concepts are doing most of the heavy lifting in this article: linear codes, tensor codes, and the IOPCS abstraction. Let's get comfortable with each.
+
+### Linear codes, operationally
+
+A **linear code** is a function $C: \mathbb F^k \to \mathbb F^\ell$ that takes a $k$-symbol message and produces a $\ell$-symbol codeword, with $\ell > k$. "Linear" means $C$ is a linear map over $\mathbb F$ — you can think of it as multiplication by a fixed $\ell \times k$ matrix $G_C$ (the code's _generator matrix_), so $C(m) = G_C \cdot m$.
+
+Two numbers tell you everything about a code:
+
+- **Rate** $\rho = k/\ell$. How much the encoding expands messages.
+- **Distance** $\delta$. The minimum fraction of positions in which two distinct codewords must differ.
+
+There's an unavoidable tension: higher rate means less room to spread codewords apart, so distance has to shrink. Reed–Solomon (RS) hits the Singleton bound, making it the best-distance code for any given rate, but RS encoding takes $O(\ell \log \ell)$ time because of FFTs. The RAA codes used in Blaze trade distance for $O(\ell)$ encoding.
+
+Distance isn't just about correcting errors. For a PCS, distance is what makes cheating _detectable_. If a cheating prover sends a matrix $F$ that's not a valid codeword, the code's distance guarantees that $F$ disagrees with any real codeword on at least $\delta \cdot \ell$ positions — which means a verifier who spot-checks a few positions is likely to catch them.
+
+One more concept we'll need. Given a received word $f \in \mathbb F^\ell$ (which may be corrupted), the **list decoding** of $f$ within radius $\delta'$ is the set of codewords within distance $\delta'$ of $f$. When $\delta' < \delta/2$ — the **unique decoding radius** $\delta_{UD}$ — the list has at most one element; you can unambiguously recover "the" nearest codeword. Beyond $\delta_{UD}$, the list can be exponentially large, which is a pain to reason about, but working in that regime cuts the number of queries we need, so we'll push into list decoding later.
+
+### Tensor codes: codes on 2D data
+
+Given a linear code $C$, the **tensor code** $C^2$ extends $C$ to encode $k \times k$ matrices. The construction is:
+
+1. **Encode rows.** Apply $C$ to each row of $M$. Result: a $k \times \ell$ matrix $U$. Rows of $U$ are codewords of $C$.
+2. **Encode columns.** Apply $C$ to each column of $U$. Result: an $\ell \times \ell$ matrix $F$. Columns of $F$ are codewords of $C$.
+
+Picture it as three matrices of progressively increasing size:
+
+- $M$ is $k \times k$ — the original polynomial's coefficients, reshaped as a matrix.
+- $U$ is $k \times \ell$ — wider, because we encoded rows.
+- $F$ is $\ell \times \ell$ — taller _and_ wider, because we then encoded columns.
+
+The tensor code has rate $\rho^2$ and distance $\delta^2$. The key insight for protocol design: **$F$ has structure on both axes**. Every column of $F$ is a codeword of $C$ (from step 2), and the intermediate $U$ (which you can recover from $F$ by column-decoding) has every row a codeword of $C$ (from step 1). We're going to exploit this 2D structure to run spot checks cheaply.
+
+Concretely: for $n = 2^{25}$ and a rate-$1/2$ code, $k = \sqrt n \approx 5793$ and $\ell \approx 11585$. $F$ is then about $134$ million entries. The prover builds $F$ and Merkle-commits to its entries. The verifier will only read a few of them.
+
+### Interactive oracle PCSs (IOPCSs)
+
+When we describe a hash-based PCS in full detail, there's a lot of mechanical plumbing: Merkle trees, hash functions, Fiat–Shamir, indexing schemes. Reasoning about all that at once is exhausting. Instead, we abstract the plumbing away and reason about a cleaner model: the **interactive oracle PCS** (IOPCS).
+
+In an IOPCS, the prover sends "oracles," which are just long vectors. The verifier can "query" an oracle at a specific position and read one entry. That's it — no Merkle trees, no hashes. The magic is that you can compile any IOPCS into a real hash-based PCS with a purely mechanical recipe: commit to each oracle via a Merkle tree, turn each query into a Merkle path in the final proof, and feed random verifier challenges through Fiat–Shamir. The number of verifier queries in the IOPCS equals the number of Merkle paths in the compiled PCS.
+
+TensorSwitch is framed as an IOPCS, and it has one unusual feature: **the commitment phase is itself interactive.** Most IOPCS definitions (Diamond–Posen is the canonical one) have a one-shot commit — the prover just sends a single commitment, done. TensorSwitch's commit phase has back-and-forth: the verifier sends random challenges _during_ the commit. This is forced by a clever technique called out-of-domain sampling that we'll meet in Section 9, and the paper introduces a new notion of round-by-round _binding_ to prove it secure.
+
+## Committing with a Tensor Code
+
+Now let's see the actual protocol. We start with the commit step.
+
+**What the prover does.** Take the polynomial's coefficient vector $m \in \mathbb F^n$ and reshape it into a $k \times k$ matrix $M$ where $k = \sqrt n$. Tensor-encode it to get $F = C^2(M) \in \mathbb F^{\ell \times \ell}$. Send $F$ as an oracle — which, once compiled, means: build a Merkle tree over $F$'s $\ell^2$ entries and send the root as the commitment. Done.
+
+Visually, the commit step walks the polynomial through this pipeline:
+
+<img
+  src="/diagrams/tensor-encode.svg"
+  alt="Tensor encoding pipeline: M (k×k) is row-encoded into U (k×ℓ), then column-encoded into F (ℓ×ℓ). Original data a,b,c... gains row parity p₁,p₂... and column parity q₁,q₂..."
+/>
+
+The top-left $k \times k$ slab of $F$ still contains $M$; the rest of $F$ is "parity" data generated by the two encoding passes. That parity is what the verifier will exploit to detect cheating — if the prover tampers with one cell, many other cells have to be adjusted to stay consistent, and the verifier can catch the inconsistency by spot-checking a few positions.
+
+**What the verifier can do later.** For a small set of indices $(j, i)$, ask the prover to open $F(j, i)$ along with a Merkle path proving consistency with the commitment. That's a **point query** to $F$.
+
+Intuitively, the entire PCS comes down to: how does the verifier use a small number of point queries to $F$ to check (a) that $F$ actually corresponds to some polynomial, and (b) that this polynomial evaluates to the claimed value at the requested point?
+
+### Well-formed and malformed commitments
+
+If the prover is honest, $F$ is a valid tensor codeword: every column is a codeword of $C$, and column-decoding the columns recovers $U$, whose rows are codewords of $C$, and row-decoding _those_ recovers $M$.
+
+A dishonest prover can send any $\ell \times \ell$ matrix they want. So we need to talk about "how bad" a dishonest $F$ can be. To make this concrete, define two auxiliary things:
+
+- $G$ — the matrix you'd get by taking each column of $F$ and unique-decoding it under $C$. The $i$-th column of $G$ is whichever message $g_i \in \mathbb F^k$ satisfies $C(g_i) \approx (i\text{-th column of } F)$, if such a message exists. Otherwise it's a special $\bot$ (undefined) symbol. In the honest case, $G$ equals $U$.
+- If $G$ is mostly well-defined, the matrix $M$ (if it exists) such that $G$ is the row-wise encoding of $M$.
+
+Two cases:
+
+- **Well-formed.** $G$ is column-wise close to $U$ for some matrix $M$. The opening phase will check evaluations against this $M$.
+- **Malformed.** No such $M$ exists. The verifier needs to reject.
+
+The rest of this article designs a single protocol that handles both cases: the same spot checks catch a malformed commitment _and_ verify evaluations against a well-formed one.
+
+## The Naive Approach: AHIV Spot Checks
+
+Before we get clever, let's see how Ligero/AHIV handles this and where the quadratic wall comes from. Understanding the wall is the key to appreciating the code-switching trick later.
+
+### Random linear combinations
+
+The challenge: how does the verifier detect a malformed commitment? $G$ has $k$ rows and $\ell$ columns (one decoded column per column of $F$), and we can't read the whole thing without defeating the point of being succinct.
+
+AHIV's idea is to compress $G$'s $k$ rows into a single row and check that. The verifier picks a random vector $r \in \mathbb F^k$, and the prover sends:
+$$\mathsf{combo} = r^T M \in \mathbb F^k$$
+— a length-$k$ vector that's a random linear combination of the rows of $M$ with weights $r$. Here $r^T$ is a **row vector** (dimensions $1 \times k$), so $r^T M$ is a $(1 \times k) \cdot (k \times k) = 1 \times k$ row vector — that's $\mathsf{combo}$.
+
+In the honest case, applying $C$ to $\mathsf{combo}$ gives $C(\mathsf{combo}) = r^T U$ (because $C$ is linear and $U$'s rows are codewords of $C$), and since $G = U$ in the honest case, we also have $C(\mathsf{combo}) = r^T G$. The following diagram shows exactly how these two quantities — $C(\mathsf{combo})$ and $r^T G$ — are computed and why they're equal when the prover is honest:
+
+<img src="/diagrams/rlc-explain.svg" alt="Random linear combination flow: r^T (1×k) times M (k×k) gives combo (1×k), then C(combo) (1×ℓ). Meanwhile r^T times G (k×ℓ) gives r^T·G (1×ℓ). These are equal because C is linear." />
+
+Why should the verifier believe this compression captures everything? Because of the **proximity gap lemma**: if $G$ is far from the row-wise encoding of any matrix (the malformed case), then with overwhelming probability over the choice of $r$, the compressed vector $r^T G$ is also far from any valid codeword of $C$. Compression doesn't lose information about malformedness.
+
+So the verifier's job reduces to: check that $r^T G$ and $C(\mathsf{combo})$ agree on most positions.
+
+### Spot checking (and why it hurts)
+
+The verifier can't check every position of $r^T G$ — that would defeat being succinct. Instead, they **spot check**: sample a random column index $i$, compute $r^T g_i$ (the $i$-th column of $G$, times $r$), and check that it equals $C(\mathsf{combo})[i]$.
+
+Here's where the wall comes in. **To compute $r^T g_i$, the verifier has to read _all of_ $g_i$.** $r$ is an arbitrary unstructured vector — there's no shortcut. You can't deduce $r^T g_i$ from a subset of $g_i$'s entries. You need all $k = \sqrt n$ of them.
+
+<img
+  src="/diagrams/AHIV-spot-check.svg"
+  alt="AHIV spot check: reading column i of G requires all k = √n entries, costing √n Merkle path opens per spot check"
+/>
+
+Each entry of $g_i$ corresponds (via unique decoding) to data from the committed $F$. In the Ligero realization, where the prover commits to $U$ directly, that's $\sqrt n$ Merkle path opens per spot check. With enough spot checks to catch cheats with probability $2^{-\lambda}$ (about $\lambda/\delta$ repetitions), total queries are:
+$$\Omega\!\left(\frac{\lambda \sqrt n}{\delta}\right) \text{ Merkle path opens.}$$
+
+For $n = 2^{25}$, $\lambda = 128$, $\delta = 1/2$: that's on the order of $10^6$ Merkle paths, each about a kilobyte. Multi-megabyte proofs.
+
+**The reason for the wall in one sentence:** arbitrary linear combinations over random weights make every position of the oracle relevant, so the verifier can't take shortcuts.
+
+## A Thinking Tool: The Linear Query Model
+
+Here's the sleight of hand that breaks the wall. It's worth slowing down for, because the rest of the article lives in this model.
+
+### Point queries vs. linear queries
+
+In a standard hash-based PCS, the only kind of access a verifier has to a prover's committed oracle $v$ is a **point query**: "what's the $i$-th entry of $v$?" The prover answers $v[i]$ along with a Merkle path, and the verifier checks the path. That's it. One point query = one Merkle path on the wire.
+
+Now imagine a fictional, stronger kind of access: a **linear query**. A linear query lets the verifier pick a weight vector $w \in \mathbb F^k$ and get
+$$\langle v, w\rangle = \sum_{i=1}^{k} v[i] \cdot w[i]$$
+in a single step. Think of it as "read a weighted sum of $v$, for free."
+
+A linear query isn't something Merkle trees support natively. The inner product depends on _every_ entry of $v$, so you can't answer one with a single Merkle path. But for the sake of _designing_ a protocol, it's useful to pretend the verifier has this superpower. We'll call this the **linear query model**.
+
+### Why pretend?
+
+Two reasons.
+
+**Reason 1: the linear query model decouples design from mechanics.** In AHIV, the reason "compute $r^T g_i$" costs $\sqrt n$ is that we only have point queries. If we had linear queries, $r^T g_i$ would cost exactly one query — regardless of $k$. That means any protocol we design in the linear query model is automatically "query-efficient" in the sense that matters; we've separated the question of "what to check" from "how to check it."
+
+**Reason 2: linear queries on small oracles are cheap to compile away.** Here's the trick that makes the fictional model honest: if the oracle $v$ is _small enough_, we can just commit to $v$ with a separate PCS instance (a smaller one). When the verifier wants a linear query answer, the prover sends the claimed value $\langle v, w\rangle$ and proves it's correct using the smaller PCS's opening protocol.
+
+Concretely: TensorSwitch will use linear queries to oracles of size $O(\sqrt n)$. In Part 2, we'll commit to those oracles with a _smaller_ TensorSwitch instance, which itself uses linear queries to oracles of size $O(n^{1/4})$, and so on — $\log \log n$ levels of recursion. At the bottom, the oracles are constant-sized and the prover just sends them on the wire.
+
+### Your mental model going forward
+
+When you see "the verifier issues a linear query to oracle $v$ with weights $w$" in the rest of this article, think:
+
+> **Ideal picture (what we're designing against).** The verifier magically gets $\langle v, w\rangle$.
+
+> **Real picture (what Part 2 will deliver).** The prover commits to $v$ with a cheaper sub-PCS. Later, the prover claims $\langle v, w\rangle = c$ and proves the claim using the sub-PCS's opening protocol.
+
+The ideal picture is what you need to follow the protocol. The real picture is what keeps it honest. We'll build the ideal picture now and cash out the real one in Part 2.
+
+Point queries to $F$, by contrast, are _not_ fictional — they're the real Merkle-path operations on the main commitment. We'll keep those honest all along.
+
+## Code Switching: Climbing the AHIV Wall
+
+Now we have the tools to see TensorSwitch's central trick.
+
+### The idea in one sentence
+
+Instead of making the verifier learn $g_i$ by reading $\sqrt n$ entries from the committed $F$, **have the prover send $g_i$ as a fresh, small oracle**, and use linear queries to check it cheaply.
+
+That's the core idea, due to Ron-Zewi and Rothblum (2024), which they call **code switching**.
+
+Obviously a cheating prover could send any vector they want as "$g_i$" and claim it's the real thing. So we need a cross-check that catches the lie. The cross-check is the clever part, and it's where the two-check structure you're about to see earns the entire $\delta^2$ soundness bound.
+
+### The setup
+
+Picture what the verifier is looking at during a spot check. The prover has already committed to $F$ (Merkle root) and sent $\mathsf{combo} \approx r^T M$ as a fresh small oracle. The verifier samples a random column index $i$, and the prover responds with a new, small linear oracle $\mathsf{col}_i \in \mathbb F^k$.
+
+Where does $\mathsf{col}_i$ come from? The prover takes the $i$-th column of $F$ (which has $\ell$ entries), decodes it under $C$ to recover $g_i$ (which has $k$ entries — recall that $C$ maps $\mathbb F^k \to \mathbb F^\ell$, so decoding goes the other way), and sends $g_i$ as $\mathsf{col}_i$. In other words, **$\mathsf{col}_i$ is derived from $F$ via column-decoding** — it's the $i$-th column of $G$.
+
+<img
+  src="/diagrams/code-switching.svg"
+  alt="Code switching: F (committed) with point query at (j,i), col_i (fresh oracle), combo = r^T M. Check 1 tests row consistency, Check 2 tests column consistency. Combined catch probability is (δ/2)²."
+/>
+
+Nothing stops the prover from lying here — they can send any vector they like as $\mathsf{col}_i$, at zero cost to themselves. Our job is to trap them regardless.
+
+The trick is to run **two** checks per repetition. The first traps the "truthful but inconsistent" case; the second traps the "lying about $g_i$" case. Between them, there's nowhere for a cheating prover to hide.
+
+### Check 1 — Row consistency
+
+The first check asks: **does $\mathsf{col}_i$ agree with $\mathsf{combo}$?**
+
+If everything were honest, $r^T g_i$ would equal $C(\mathsf{combo})[i]$ (the $i$-th entry of $C$ applied to $\mathsf{combo}$). So we test exactly that, using $\mathsf{col}_i$ in place of $g_i$:
+
+```text
+     Check 1:    r^T · col_i     ==    C(combo)[i]
+                 ─────────────         ─────────────
+                 inner product         i-th entry of
+                 of col_i with         C applied to
+                 the random r          combo
+```
+
+**How it's computed.**
+
+- Left side: one linear query to $\mathsf{col}_i$ with weight vector $r$.
+- Right side: one linear query to $\mathsf{combo}$ with weights equal to the $i$-th row of $C$'s generator matrix. (Remember: $C$ is a linear map, so $C(\mathsf{combo})[i]$ is a specific weighted sum of the entries of $\mathsf{combo}$ — exactly the thing a linear query delivers.)
+
+Both sides are linear queries to small, fresh oracles. **No point queries to $F$ at all.** Very cheap.
+
+**What it catches.** If the prover played truthfully by setting $\mathsf{col}_i = g_i$, and $g_i$ itself turns out to be inconsistent with $\mathsf{combo}$, Check 1 directly tests $r^T g_i = C(\mathsf{combo})[i]$, which fails. Caught.
+
+But a cheating prover wouldn't be that naive. If they knew $g_i$ was inconsistent, they'd send a _fake_ $\mathsf{col}_i \neq g_i$ cooked up to make Check 1 pass. That's where the second check comes in.
+
+### Check 2 — Column consistency
+
+The second check asks: **is $\mathsf{col}_i$ actually consistent with the committed $F$?**
+
+If the prover were honest, $C(\mathsf{col}_i)$ would equal the $i$-th column of $F$ (because $g_i$ was defined as the decoding of that column). So we test that relationship at a random row $j$:
+
+```text
+     Check 2:    C(col_i)[j]     ==    F[j][i]
+                 ─────────────          ────────
+                 j-th entry of          ONE point
+                 C applied to           query to F
+                 col_i                  at (j, i)
+```
+
+**How it's computed.**
+
+- Left side: one linear query to $\mathsf{col}_i$ with weights equal to the $j$-th row of $C$'s generator matrix.
+- Right side: **one point query to $F$.** The verifier picks a random $j \in [\ell]$ and opens the Merkle path to $F[j][i]$. This is the _only_ point query in the entire spot-check repetition.
+
+**What it catches.** If $\mathsf{col}_i \neq g_i$ (the prover lied), then $C(\mathsf{col}_i)$ is a valid codeword of $C$ — but it's a _different_ codeword from the one the $i$-th column of $F$ is close to. Two distinct codewords of $C$ must disagree on at least a $\delta$-fraction of their positions. So at a random row $j$, Check 2 fires with probability at least $\delta/2$ (under unique decoding).
+
+### Walking through a cheat attempt
+
+Let's make the argument concrete. Suppose the prover sent a completely bogus $F$ — no underlying polynomial, just garbage. What happens in one spot-check repetition?
+
+<img
+  src="/diagrams/cheat-check.svg"
+  alt="Cheat walkthrough flowchart: sample column i, if bad (prob ≥ δ/2), prover picks Option A (truth, caught by Check 1) or Option B (lie, caught by Check 2 with prob ≥ δ/2). Combined: (δ/2)² per repetition."
+/>
+
+The crucial observation: **every repetition does constant work**, regardless of how big $n$ is. One Merkle path open (Check 2's point query to $F$), plus a handful of cheap linear queries to small oracles. Unlike AHIV, the verifier never has to read a whole column of anything from the committed data.
+
+### Parallel repetitions
+
+Run the spot check $t$ times in parallel, with independent random $i$ and $j$ each time. To drive the total cheating probability below $2^{-\lambda}$, set
+$$t \;=\; \frac{\lambda}{-\log\!\bigl(1 - (\delta/2)^2\bigr)} \;\approx\; \frac{4\lambda}{\delta^2}.$$
+
+For rate-$1/2$ Reed–Solomon ($\delta = 1/2$), that's about $\sim 16\lambda$ repetitions within the unique decoding radius. A later section will show how to push into list decoding (where Check 2 gets tighter) and cut this to about $2.4\lambda$ — roughly $300$ Merkle paths for $\lambda = 128$.
+
+### Why this beats the AHIV wall
+
+Here's the before/after in one glance:
+
+|                                                   | AHIV                                              | TensorSwitch                                               |
+| ------------------------------------------------- | ------------------------------------------------- | ---------------------------------------------------------- |
+| **Per repetition**                                | $\sqrt n$ Merkle path opens (whole column of $G$) | 1 Merkle path open + cheap linear queries to small oracles |
+| **Soundness / rep**                               | $\sim \delta/2$                                   | $\sim (\delta/2)^2$                                        |
+| **Total reps**                                    | $\sim O(\lambda)$                                 | $\sim 4\lambda/\delta^2$                                   |
+| **Total MP opens**                                | $\sim \lambda\sqrt n$                             | $\sim 4\lambda/\delta^2$                                   |
+| **$n = 2^{25}$, $\lambda = 128$, $\delta = 1/2$** | $\sim 10^6$ opens (multi-MB proof)                | $\sim 2000$ opens (sub-MB proof)                           |
+
+The soundness bound per repetition is slightly worse ($\delta^2$ vs $\delta$), so we need a constant factor more repetitions. But each repetition does $O(1)$ work instead of $O(\sqrt n)$ — a massive win.
+
+And the $\mathsf{col}_i$ oracles, collected together, take $t \cdot k = O(\lambda \sqrt n / \delta^2)$ field elements total — still much smaller than $n$. In Part 2 we'll commit to _those_ with a smaller TensorSwitch instance and recurse, shrinking them further until they're tiny enough to send in the clear.
+
+## Checking Evaluation Claims
+
+So far we've only been checking that the commitment isn't malformed. A real PCS has a second job: proving that $\hat m(z) = v$ for a given point $z \in \mathbb F^{\log n}$ and value $v \in \mathbb F$, where $\hat m$ is the multilinear extension of $m$.
+
+Both jobs end up being handled by the same spot-check machinery. Here's the full picture — the left side shows how eval is computed and checked, the right side shows why eval and combo turn out to be the same oracle:
+
+<img src="/diagrams/eval-flow.svg" alt="Evaluation claim flow: z splits into (x,y). eq_x^T times M gives eval. Verifier checks inner product of eval with eq_y equals v. The merge: setting r := eq_x makes eval = combo, so one oracle handles both malformed detection and evaluation checking." />
+
+Let's walk through it step by step.
+
+### Split the query point
+
+The point $z$ has $\log n = 2 \log k$ coordinates. Split them into two halves:
+$$z = (x, y), \quad x, y \in \mathbb F^{\log k}.$$
+Think of $x$ as "picks a row of $M$" and $y$ as "picks a column of $M$."
+
+The prover sends an intermediate vector $\mathsf{eval} \in \mathbb F^k$, which is _supposed_ to be the function
+$$q(b) = \hat m(x, b), \quad b \in \\{0,1\\}^{\log k}$$
+— i.e., the "row of $M$ picked by $x$," viewed as a function on $\log k$ boolean inputs.
+
+(Reality check: $q$ is a vector of $k$ base-field values, one for each of the $2^{\log k} = k$ boolean choices of $b$. It's small.)
+
+### First check: final evaluation
+
+If the prover's $\mathsf{eval}$ is correct, then the multilinear extension of $\mathsf{eval}$ evaluated at $y$ should equal the claimed value $v$:
+$$\hat{\mathsf{eval}}(y) = v.$$
+Why? Because $\hat m(z) = \hat m(x, y) = \hat q(y) = \hat{\mathsf{eval}}(y)$ when $\mathsf{eval} = q$.
+
+The verifier checks this with **one linear query** to $\mathsf{eval}$. The key observation is that for any vector $v \in \mathbb F^k$, $\hat v(y) = \langle v, \mathsf{eq}_y\rangle$ where $\mathsf{eq}_y$ is the "equality coefficient vector" for $y$ (a specific length-$k$ vector, cheap to compute, that implements the multilinear extension's evaluation at $y$ as an inner product). So the check is:
+$$\langle \mathsf{eval}, \mathsf{eq}_y\rangle \stackrel{?}{=} v.$$
+
+If this passes, we believe $\mathsf{eval}$'s extension evaluated correctly at $y$ — but only _conditional_ on $\mathsf{eval}$ actually being the row $q$ that the prover is supposed to have sent. Which brings us to the second check.
+
+### Second check: cross-check $\mathsf{eval}$ against the committed $F$
+
+Why should the verifier believe $\mathsf{eval}$ is the real $q$? Because of a beautiful algebraic identity.
+
+Since $\hat m$ is multilinear, we can write
+$$q(b) = \hat m(x, b) = \sum_{a \in \\{0,1\\}^{\log k}} \mathsf{eq}(x, a) \cdot M(a, b).$$
+That sum is exactly a linear combination of the rows of $M$, weighted by the equality coefficient vector $\mathsf{eq}_x$. In matrix form:
+$$q = \mathsf{eq}_x^T M.$$
+So $q$ is the row-vector you get from multiplying $\mathsf{eq}_x$ (a specific, structured row vector) into $M$. And because $C$ is linear, applying $C$ gives
+$$C(q) = \mathsf{eq}_x^T U$$
+(the same combination applied to the row-wise encoding).
+
+Now recall that the well-formed case means $G \approx U$ column-wise. So $\mathsf{eq}_x^T G \approx C(q) = C(\mathsf{eval})$ if the prover is honest.
+
+**And here's the punchline.** Compare to the malformed-commitment check from the last section: the spot check was "at random column $i$, is $r^T g_i$ consistent with $C(\mathsf{combo})[i]$?" If we set
+$$r := \mathsf{eq}_x$$
+then $\mathsf{combo}$ ends up equal to $\mathsf{eval}$ (both are $\mathsf{eq}_x^T M$), and the spot check we already designed handles the evaluation cross-check automatically. One oracle, two jobs.
+
+### The merged opening phase
+
+Putting the two checks together:
+
+1. The verifier sets $r := \mathsf{eq}_x$ (from the query point $z = (x, y)$).
+2. The prover sends **one oracle** $\mathsf{eval} \in \mathbb F^k$, which doubles as $\mathsf{combo}$.
+3. **Check A — final evaluation.** Verifier checks $\langle \mathsf{eval}, \mathsf{eq}_y\rangle = v$ with one linear query to $\mathsf{eval}$.
+4. **Checks B — $t$ parallel spot checks.** For each repetition: verifier samples column $i$ and row $j$, prover sends $\mathsf{col}_i$, verifier runs the row consistency check (against $\mathsf{eval}$) and the column consistency check (against $F$).
+
+If all checks pass, accept. Done.
+
+The only subtlety: setting $r := \mathsf{eq}_x$ instead of fully random costs us a tiny bit in the proximity gap analysis. The paper handles this by assuming $C$ satisfies a slightly stronger proximity-gap property called **mutual correlated agreement** [ACFY25]. This is known to hold for Reed–Solomon near the Johnson bound, and conjectured to hold for many other codes.
+
+## Beyond the Unique Decoding Radius (Briefly)
+
+There's one more optimization worth mentioning, though we'll keep it light.
+
+Recall the repetition count: $t \approx 4\lambda/\delta^2$. This is because Check 2's soundness is driven by $\delta/2$ (the unique decoding radius), not $\delta$ itself. If we could somehow work with $\delta$ — pushing into the **list decoding** regime where there can be multiple candidate codewords within distance $\delta$ — we'd cut $t$ by a factor of 4. For rate-$1/2$ RS, that's the difference between $\sim 16\lambda$ and $\sim 4\lambda$ repetitions.
+
+The problem: beyond unique decoding, there's no single "the" decoded column $g_i$. The list of candidates can be exponential. Which one counts as the prover's commitment?
+
+**The fix: out-of-domain sampling**, introduced by DEEP-FRI [BGKS20]. TensorSwitch uses it in _two_ rounds during the commit phase, which is why the commit phase is interactive:
+
+1. After the prover sends $F$, the verifier samples a random point $\zeta \in \mathbb F^{\log k}$ and sends it.
+2. The prover sends $\mathsf{ood} \in \mathbb F^\ell$: purportedly, the multilinear evaluation of each column of $G$ at $\zeta$.
+3. The verifier samples another random point $\zeta' \in \mathbb F^{\log n}$ and sends it.
+4. The prover sends $\mu \in \mathbb F$: purportedly $\hat m(\zeta')$.
+
+The intuition: over a large field, two distinct multilinear polynomials disagree at a random point with overwhelming probability (Schwartz–Zippel). So among all the possible candidate $G$'s, only one will be consistent with a random $\zeta$-evaluation. That nails down _which_ $G$ to treat as the commitment, even if the list-decoding candidates are numerous. Similarly, $\zeta'$ nails down $M$ among all possible row-wise decodings of $G$.
+
+The opening phase picks up one extra obligation — check that each $\mathsf{col}_i$'s multilinear evaluation at $\zeta$ agrees with $\mathsf{ood}[i]$ — which is just one more linear query per repetition.
+
+> For the formal binding statement, see Lemma 3.18 and Section 2.3 of the TensorSwitch paper. DEEP-FRI introduced out-of-domain sampling for FRI; TensorSwitch extends it to two rounds, pinning down both the column-decoded intermediate and the row-decoded final message.
+
+## Where We Stand
+
+Let's recap what we've built, end-to-end.
+
+**Commit phase.** The prover computes $F = C^2(M)$ and sends it as a point oracle (Merkle-committed). Then the verifier and prover exchange two rounds of out-of-domain sampling: $\zeta$ and $\mathsf{ood}$, then $\zeta'$ and $\mu$. The commitment is the Merkle root of $F$ plus the transcript of the interaction.
+
+**Opening phase.** Given a claim $\hat m(z) = v$ with $z = (x, y)$:
+
+1. Set $r := \mathsf{eq}_x$.
+2. Prover sends one linear oracle $\mathsf{eval} \in \mathbb F^k$.
+3. Verifier checks $\langle \mathsf{eval}, \mathsf{eq}_y\rangle = v$ (one linear query to $\mathsf{eval}$).
+4. For $t \approx \lambda/\delta^2$ parallel repetitions: verifier samples $i, j$; prover sends $\mathsf{col}_i \in \mathbb F^k$; verifier runs the row consistency check, the column consistency check, and the $\mathsf{ood}$ consistency check. Each repetition costs **one** point query to $F$ and a few linear queries to small oracles.
+
+**Costs.**
+
+- Prover time: linear in $n$, dominated by encoding $F$ and producing the $\mathsf{col}_i$ oracles (about $6n$ base-field multiplications for opening).
+- Point queries to $F$: $t \approx O(\lambda/\delta^2)$. Each becomes a Merkle path in the real PCS.
+- Linear queries: a handful per repetition, to small oracles of total size $O(\lambda\sqrt n)$ (or $O(\sqrt{\lambda n})$ with a skewed tensor).
+
+This is dramatically better than AHIV. We've replaced $\sqrt n$-sized column reads with single-point reads of $F$ plus a constant number of linear queries to much smaller oracles.
+
+## Why We're Not Done Yet
+
+The catch: this whole protocol lives in the linear query model. A real hash-based PCS only supports point queries, not linear queries. So what we've really built is an IOPCS in an idealized world — not yet a real, deployable PCS.
+
+The plan for Part 2 is simple to state and intricate to execute: **recursively commit to the $\mathsf{col}_i$ and $\mathsf{eval}$ oracles themselves with a smaller TensorSwitch instance.** A linear query to a committed oracle becomes "an evaluation claim that the smaller instance has to handle." After $\log \log n$ levels of recursion, the oracles shrink to constant size and the verifier can just read them directly without compilation.
+
+But the details are nontrivial. Part 2 will explain:
+
+- **The recursion level by level.** What shrinks, by how much, and why square-rooting happens.
+- **What the verifier has to compute locally** to make each recursion level work. (Spoiler: multilinear extensions of the generator matrix of $C$, which the paper calls _right-extensions_.)
+- **How to keep the total query count at $O(\lambda)$** rather than $O(\lambda \log \log n)$ across all recursion levels. (Spoiler: use progressively higher-distance codes at deeper levels.)
+- **How to prove round-by-round security** when the commitment phase is interactive, and where the paper's new "round-by-round binding" notion comes in.
+- **The full efficiency numbers** for two concrete instantiations — one with Reed–Solomon (2.41$\lambda$ queries, rate $1/2$) and one with Blaze-style RAA codes (19$\lambda$ queries, rate $1/4$).
+- **A bonus:** how the same machinery gives $\sqrt{\lambda n}$-sized IVC/PCD proofs as a side effect.
+
+That's Part 2.
+
+## References
+
+- **TensorSwitch (this paper)**: Bünz, B., Fenzi, G., Rothblum, R. D., Wang, W. (2025). "TensorSwitch: Nearly Optimal Polynomial Commitments from Tensor Codes."
+- **Spartan**: Setty, S. (2020). "Spartan: Efficient and general-purpose zkSNARKs without trusted setup." CRYPTO 2020. [https://eprint.iacr.org/2019/550.pdf](https://eprint.iacr.org/2019/550.pdf)
+- **Ligero / AHIV**: Ames, S., Hazay, C., Ishai, Y., Venkitasubramaniam, M. (2017). "Ligero: Lightweight sublinear arguments without a trusted setup." CCS 2017.
+- **Brakedown**: Golovnev, A., Lee, J., Setty, S., Thaler, J., Wahby, R. S. (2023). "Brakedown: Linear-time and field-agnostic SNARKs for R1CS." CRYPTO 2023.
+- **Blaze**: Brehm, M., Chen, B., Fisch, B., Resch, N., Rothblum, R. D., Zeilberger, H. (2025). "Blaze: Fast SNARKs from Interleaved RAA Codes." EUROCRYPT 2025.
+- **FRI**: Ben-Sasson, E., Bentov, I., Horesh, Y., Riabzev, M. (2018). "Fast Reed-Solomon Interactive Oracle Proofs of Proximity."
+- **WHIR**: Arnon, G., Chiesa, A., Fenzi, G., Yogev, E. (2024). "WHIR: Reed-Solomon Proximity Testing with Super-Fast Verification." [https://eprint.iacr.org/2024/1586.pdf](https://eprint.iacr.org/2024/1586.pdf)
+- **Code switching**: Ron-Zewi, N., Rothblum, R. D. (2024). "Local Proofs Approaching the Witness Length."
+- **Out-of-domain sampling (DEEP-FRI)**: Ben-Sasson, E., Goldberg, L., Kopparty, S., Saraf, S. (2019). "DEEP-FRI: Sampling Outside the Box Improves Soundness." [https://eprint.iacr.org/2019/336.pdf](https://eprint.iacr.org/2019/336.pdf)
