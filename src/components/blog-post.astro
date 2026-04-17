@@ -21,7 +21,7 @@ const { frontmatter } = Astro.props;
     </div>
     <header>
       <div class="space-y-1">
-        <h1 class="font-semibold">{frontmatter.title}</h1>
+        <h1 class="text-3xl font-semibold tracking-tight">{frontmatter.title}</h1>
         <p class="text-neutral-500 dark:text-neutral-400">
           {
             new Date(frontmatter.pubDate).toLocaleDateString("en-US", {
