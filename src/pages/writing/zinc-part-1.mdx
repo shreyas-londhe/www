@@ -1,0 +1,263 @@
+---
+layout: ../../components/blog-post.astro
+title: "Zinc I: A PIOP Over the Rationals That Bypasses Arithmetization"
+description: "Part 1 of a walkthrough of Zinc, a hash-based SNARK that proves integer arithmetic statements with almost no arithmetization overhead. This part builds the Zinc-PIOP framework — a PIOP over the rationals built from a collection of PIOPs over finite fields."
+pubDate: "2026-05-05"
+tags: ["zero-knowledge", "snarks", "integer-arithmetic"]
+---
+
+## What problem are we solving?
+
+Most modern SNARKs are wired to prove statements in a single fixed finite field $\mathbb F$. Industry-leading systems pick a field whose arithmetic is fast on a CPU — Stwo uses the Mersenne-31 prime, others use BabyBear ($p \approx 2^{31}$) or Goldilocks ($p \approx 2^{64}$). That's great when your statement naturally lives in $\mathbb F$. It's not great when it doesn't.
+
+A "wrong-shape" relation has to be **arithmetized**: rewritten so it can be checked using only the field's native operations. Modular arithmetic with a non-prime modulus, multi-modulus statements, integer comparisons, RSA-group operations, FHE-related computations — all of these blow up by a noticeable factor when you force them through a fixed-prime $\mathbb F$. The Zinc paper calls that factor the **arithmetization overhead**, and it can easily reach $2^5$ (32$\times$) or more for realistic relations.
+
+That overhead matters because, in production systems, it's the dominant cost. For Stwo, more than 80% of the proving time goes into computing the trace, the low-degree extension of the trace, and the Merkle commit to it — all of which scale with statement size. The actual SNARK-after-the-witness costs less than 20%. Cutting arithmetization is the single biggest lever for making proving cheaper.
+
+**Zinc** (Garreta, Waldner, Hristova, Dall'Ava — Nethermind Research, 2025) is a hash-based succinct argument that bypasses arithmetization for a wide class of integer-arithmetic relations. Its claim sheet:
+
+- **Native integer arithmetic.** Prove statements expressed over $\mathbb Z$ — including modular arithmetic with arbitrary, possibly non-prime, possibly multiple moduli per statement.
+- **Hash-only, post-quantum-friendly.** No hidden-order groups, no RSA assumptions, no pairings. Just collision-resistant hashes and error-correcting codes.
+- **Spartan-shaped inner protocol.** Once you sample a random prime, the prover and verifier do almost exactly what they'd do in a regular hash-based SNARK over a small field.
+
+The closest prior work is **CHA24** (Campanelli–Hall-Andersen, the _mod-AHP_ framework), which also handles integer arithmetic via random-prime sampling. The catch with CHA24 is that compiling its PIOP requires a polynomial commitment scheme that extracts _integer_ polynomials, and the only known constructions for that rely on hidden-order groups. Zinc keeps the random-prime idea but works over $\mathbb Q$ instead of $\mathbb Z$, which lets it use a Brakedown-style hash-and-code PCS instead.
+
+|                          | CHA24 (mod-AHP)                     | Zinc                         |
+| ------------------------ | ----------------------------------- | ---------------------------- |
+| PIOP base ring           | $\mathbb Z_B$                       | $\mathbb Q_B$                |
+| Random prime trick       | Yes                                 | Yes                          |
+| PCS commits to           | integer polynomials                 | bounded-rational polynomials |
+| PCS construction         | hidden-order groups (BHR+21)        | Brakedown-style (Zip)        |
+| Cryptographic assumption | RSA-style (groups of unknown order) | collision-resistant hashing  |
+| Post-quantum             | No                                  | Plausibly yes                |
+| Multi-modulus per stmt   | Yes                                 | Yes                          |
+
+This article is **Part 1** of a two-part walkthrough. In Part 1 we build **Zinc-PIOP**: the framework that turns any Spartan-style PIOP over $\mathbb F_q$ into a PIOP over $\mathbb Q$ for integer-arithmetic relations. We treat the polynomial commitment scheme as an oracle. **Part 2** will build the real PCS — **Zip**, a Brakedown variant constructed from a new primitive called an _IOP of Proximity to the Integers_.
+
+**Prerequisites.** R1CS, multilinear extensions, the sum-check protocol, and basic finite-field linear algebra. Some comfort with elementary ring theory helps — what a subring is, what a ring homomorphism is — but everything load-bearing is built from scratch. The lifted R1CS relation, the localization $\mathbb Z_{(q)}$, and the projection trick all get full treatment below.
+
+### A glossary before we touch the protocol
+
+A handful of symbols recur throughout. Worth getting them into your head up front:
+
+- **$\lambda$** — the **security parameter** (bits of soundness). Typically $100$ or $128$.
+- **$B$** — a **bit-size bound** on entries. Witnesses and instance entries are constrained to integers (or rationals, encoded as bit-strings) of bit-size less than $B$. Throughout, $B = \mathrm{poly}(\lambda)$.
+- **$q$** — a random prime sampled by the verifier, $\Omega(\lambda)$ bits long. The whole protocol is "do something modulo $q$."
+- **$\mathbb Q_B$** — the set of rationals whose encoding fits in $< B$ bits. The "bounded rationals."
+- **$\mathbb Z_{(q)}$** — the **localization** of $\mathbb Q$ at the prime $q$: rationals $a/b$ where $q \nmid b$. Operationally, "the rationals you can safely reduce mod $q$." A subring of $\mathbb Q$ that admits a clean projection to $\mathbb F_q$ — most of the article is built around this fact.
+- **$\phi_q$** — the **projection** $\phi_q: \mathbb Z_{(q)} \to \mathbb F_q$ defined by $a/b \mapsto a \cdot b^{-1} \bmod q$. A ring homomorphism. Extends component-wise to vectors and matrices.
+- **$\mathbf m$** — a vector of moduli, one per constraint. This is what makes Zinc multi-modulus-friendly.
+
+## The Two Walls "Spartan over $\mathbb Z$" Hits
+
+Before we get to Zinc proper, it helps to see why the obvious approach — "just run Spartan over the integers" — falls apart. The two walls are what motivate every design choice that follows.
+
+### Wall 1: coefficients explode during sum-check
+
+Sum-check is the workhorse of every modern SNARK. Each round, the prover sends a univariate polynomial summarizing one variable; the verifier replies with a random challenge from the field. Each multiplication mixes a challenge into the data and accumulates.
+
+Over $\mathbb F_q$, that's fine — every intermediate value is reduced mod $q$ and stays $\log q$ bits wide. Over the integers, there's nowhere to reduce. After $\mu$ rounds with $\lambda$-bit challenges, intermediate integers can reach $\mu \cdot \lambda$ bits. Concretely, with $B = 256$, $n = 2^{20}$ (so sum-check has $\approx 20$ rounds), and $128$-bit verifier challenges, intermediate integers in the PIOP can grow to thousands of bits. Multiplying multi-thousand-bit integers is expensive, and that overhead blows past whatever you saved on arithmetization.
+
+CHA24's fix is the random-prime trick: have the verifier sample a random prime $q$ at round zero and run the sum-check **modulo $q$**. Now the entire PIOP operates with $\sim \lambda$-bit integers throughout. We'll do the same.
+
+### Wall 2: the PIOP needs an integer-polynomial PCS
+
+Every PIOP becomes a real argument by compiling it with a polynomial commitment scheme. The PIOP's soundness only holds if the prover is restricted to oracles in some prescribed set — for a PIOP over $\mathbb Z_B$, that means the prover must commit to polynomials with **integer** coefficients of bit-size $< B$.
+
+That's a strong requirement, and it's the wall. The only known PCS that extracts integer polynomials is the one by Block et al. (BHR+21), based on **hidden-order groups** — RSA groups, class groups, and similar structures. Hidden-order groups are heavy (every operation is many big-integer modular exponentiations), they require RSA-style hardness assumptions, and they aren't plausibly post-quantum secure. CHA24 inherits this dependency.
+
+**Zinc's pivot.** Instead of restricting to $\mathbb Z$, work over $\mathbb Q$. $\mathbb Q$ is a _field_, so PCS extraction is easy — any reasonable hash-and-code PCS over $\mathbb Q$ extracts $\mathbb Q$-coefficient polynomials by construction. The PCS can be a Brakedown variant: just hashes and linear codes, no hidden-order groups, no RSA. The cost: you separately need a way to force the witness to actually be integers, which we'll handle with a lookup argument at the end.
+
+**The catch.** Working over $\mathbb Q$ raises a fresh problem. The random-prime trick wants a clean "reduce mod $q$" operation, and $\mathbb Q$ doesn't have one — what would $1/q \bmod q$ even mean? The fix is the localization $\mathbb Z_{(q)}$, and that's the next section.
+
+## R1CSℓ: Lifting R1CS to the Integers
+
+Before we project anything, we need to write down the relation we want to prove. Vanilla R1CS over a finite field $\mathbb F_q$ asks for a witness $\mathbf z$ such that
+
+$$(A \cdot \mathbf z) \circ (B \cdot \mathbf z) = C \cdot \mathbf z \pmod{q}$$
+
+where $\circ$ is the Hadamard (component-wise) product and $A, B, C$ are public matrices. This is a statement _modulo $q$_ — the prime is hardwired into the relation.
+
+**Lifting it to $\mathbb Z$.** Move to integer arithmetic and make the modulus a first-class term. The constraint $(A\mathbf z) \circ (B\mathbf z) - C\mathbf z \equiv 0 \pmod q$ over $\mathbb F_q$ is equivalent to
+
+$$(A \cdot \mathbf z) \circ (B \cdot \mathbf z) - C \cdot \mathbf z = q \cdot \mathbf u \quad \text{(over } \mathbb Z\text{)}$$
+
+for _some_ integer vector $\mathbf u$. The witness is now $(\mathbf z, \mathbf u)$: the original solution plus the multiple of $q$ that compensates. The modulus has gone from a property of the field to a coefficient in the constraint.
+
+**Multi-modulus generalization.** Once $q$ is a coefficient, nothing stops it from being _different in every row_. Replace the scalar $q$ with a vector $\mathbf m$ of moduli, one per constraint:
+
+$$(A \cdot \mathbf z) \circ (B \cdot \mathbf z) - C \cdot \mathbf z = \mathbf m \circ \mathbf u \quad \text{(over } \mathbb Z\text{)}.$$
+
+Each row $y$ enforces $Q(y) \equiv 0 \pmod{m_y}$, with $u_y$ absorbing the multiple. Different rows can have different $m_y$. A single statement can mix $m_y = 2^{32}$ for CPU-style word arithmetic, $m_y = 2^{64}$ for FHE-style operations, and $m_y$ a large prime for elliptic-curve operations — all in one R1CS instance, with the SNARK doing the same work it would for any other R1CS row.
+
+This is the **R1CSℓ** relation (R1CS with lifted moduli). Formally, fix a bit-size bound $B$. The relation $\mathsf{REL}_{\mathsf{R1CS}\ell, \mathbb Z}$ consists of all pairs $(\mathbf x; \mathbf w)$ where:
+
+- **Public input** $\mathbf x = (\mathbf x') \in \mathbb Z_B^k$.
+- **Witness** $\mathbf w = (\mathbf w', \mathbf u)$, with $\mathbf w' \in \mathbb Z_B^{n-k-1}$ and $\mathbf u \in \mathbb Z_B^n$.
+- **Full vector** $\mathbf z = (\mathbf w', \mathbf x', 1) \in \mathbb Z_B^n$.
+- **Constraint** $(A \mathbf z^T) \circ (B \mathbf z^T) = (C \mathbf z^T) + \mathbf m^T \circ \mathbf u^T$ over $\mathbb Z$.
+
+$A, B, C$ are public $n \times n$ integer matrices with $\mathbb Z_B$ entries, and $\mathbf m \in \mathbb Z_B^n$ is the moduli vector.
+
+A sanity check on bit-size. The paper shows that whenever $\mathbf x$, $\mathbf m$, and $A, B, C$ have entries of $\sim \lambda$-bit size, any satisfying integer witness has entries of bit-size _at least_ $\sim 2\lambda$ — the multiplications inside the constraint force this lower bound. So $B \approx 2\lambda$ is the smallest sensible choice, and $B = \mathrm{poly}(\lambda)$ covers what we actually want to prove. (The full paper handles the more general CCS relation; R1CSℓ is the simpler exposition, and everything below carries over.)
+
+**A tiny worked example.** Take $n = 2$, $k = 0$ (no public input), and a witness $\mathbf z = (z_1, z_2) = (3, 5)$ with two rows:
+
+- Row 1: $z_1 \cdot z_2 - z_1 = m_1 \cdot u_1$ with $m_1 = 4$. Compute: $3 \cdot 5 - 3 = 12 = 4 \cdot 3$, so $u_1 = 3$.
+- Row 2: $z_1 \cdot z_2 - z_2 = m_2 \cdot u_2$ with $m_2 = 7$. Compute: $3 \cdot 5 - 5 = 10$. Modulo $7$, $10 \equiv 3$, so this row only satisfies the equation in $\mathbb F_7$, not over $\mathbb Z$ — meaning row 2 is _not_ satisfiable as an integer relation with $u_2 \in \mathbb Z$ for this $\mathbf z$.
+
+So one R1CSℓ instance can mix a row that's satisfied over $\mathbb Z$ (modulus $4$) with a row that fails over $\mathbb Z$ but might pass mod its prime — and the relation tracks both honestly. The verifier's random-prime check will pick this discrepancy up.
+
+## Projecting Through the Localization
+
+We have the relation. The trick now is to prove it efficiently using a Spartan-style PIOP. The plan: work over $\mathbb Q$ during the protocol, but check the constraint after projecting to $\mathbb F_q$ for a verifier-sampled prime $q$. The localization $\mathbb Z_{(q)}$ is the algebraic object that makes this work.
+
+**Reformulating $\mathbb Q$.** Embed R1CSℓ in $\mathbb Q$ by allowing $\mathbf w' \in \mathbb Q_B^{n-k-1}$, $\mathbf u \in \mathbb Q_B^n$, with the same constraint over $\mathbb Q$. Honest provers will still use _integer_ witnesses of bit-size at most $B' < B$ — the move to $\mathbb Q$ is for security analysis and PCS compatibility, not for the prover. We'll come back to forcing integrality.
+
+**Why $\mathbb Q$, not $\mathbb Z$ ?** $\mathbb Q$ is a field. Brakedown-style PCSs extract $\mathbb Q$-coefficient polynomials with no special machinery. PCS extraction over $\mathbb Z$, by contrast, forces hidden-order groups (Wall 2). Working over $\mathbb Q$ is what lets the Zip PCS in Part 2 be hash-only.
+
+**The localization.** For a prime $q$, define
+
+$$\mathbb Z_{(q)} = {a/b \in \mathbb Q : q \nmid b\\}.$$
+
+These are the rationals whose denominator (in lowest form) isn't divisible by $q$. $\mathbb Z_{(q)}$ is a _subring_ of $\mathbb Q$ — it's closed under addition and multiplication, contains $1$, and contains $\mathbb Z$ as a sub-subring. Critically, $\mathbb Z_{(q)}$ admits a ring homomorphism to $\mathbb F_q$:
+
+$$\phi_q: \mathbb Z_{(q)} \to \mathbb F_q, \qquad a/b \mapsto a \cdot b^{-1} \bmod q.$$
+
+The inverse $b^{-1}$ exists modulo $q$ exactly because $q \nmid b$. So $\phi_q$ is well-defined, additive, and multiplicative — a ring homomorphism in the standard sense. It extends component-wise to vectors and matrices: $\phi_q(\mathbf v) = (\phi_q(v_1), \ldots, \phi_q(v_n))$.
+
+**Worked example.** Take $q = 7$. The rational $3/2$ is in $\mathbb Z_{(7)}$ since $7 \nmid 2$, and $\phi_7(3/2) = 3 \cdot 2^{-1} \bmod 7 = 3 \cdot 4 = 12 \equiv 5 \pmod 7$. The rational $5/14$ is _not_ in $\mathbb Z_{(7)}$ (its denominator is divisible by $7$), so $\phi_7$ doesn't apply. Every ordinary integer is trivially in $\mathbb Z_{(q)}$ regardless of $q$, and projects in the obvious way.
+
+**The projected relation.** A small abuse of notation: when we write $\phi_q(\mathsf{REL})$ for a relation, we mean the same relation but with the constraint required to hold _under $\phi_q$_ (in $\mathbb F_q$) rather than over the original ring. So $\phi_q(\mathsf{REL}_{\mathsf{R1CS}\ell, \mathbb Z_{(q)}})$ is R1CSℓ with all entries drawn from $\mathbb Z_{(q)}$ and the constraint checked after projection. That is, the prover sends $(\mathbf w', \mathbf u) \in \mathbb Z_{(q)}^{2n-k-1}$, but the equality
+
+$$\phi_q(A \cdot \mathbf z^T) \circ \phi_q(B \cdot \mathbf z^T) = \phi_q(C \cdot \mathbf z^T) + \phi_q(\mathbf m^T) \circ \phi_q(\mathbf u^T)$$
+
+is checked over $\mathbb F_q$. Because $\phi_q$ is a ring homomorphism, it commutes with multiplication and addition, so this is exactly an R1CSℓ-shaped check after projecting every entry to $\mathbb F_q$.
+
+For $B > \log q$, this projected relation looks like ordinary R1CS over $\mathbb F_q$ with one extra term ($\phi_q(\mathbf m) \circ \phi_q(\mathbf u)$). And here's the payoff: an existing Spartan PIOP over $\mathbb F_q$, lightly modified to handle the extra term, lifts cleanly into a PIOP over $(\mathbb Z_{(q)})_B$ for $\phi_q(\mathsf{REL}_{\mathsf{R1CS}\ell, \mathbb Z_{(q)}})$. No new sum-check machinery — it's the same sum-check, with prover and verifier operating on $\mathbb Z_{(q)}$ values that get projected at the end.
+
+(A side note for readers comparing to CHA24: the projected relation is structurally the same as their _associated fingerprinting relation_. Zinc is following CHA24's playbook with localizations chosen specifically to dodge the hidden-order-group dependency.)
+
+## Protocol 1: Zinc-PIOP
+
+We have the lifted relation, the localization, and the projection. The protocol falls out.
+
+**Setup.** $\mathsf P$ and $\mathsf V$ get $(\mathbf x; \mathbf w) \in \mathsf{REL}_{\mathsf{R1CS}\ell, \mathbb Q}$ and $\mathbf x$ respectively. The witness $\mathbf w = (\tilde{\mathbf w}, \tilde{\mathbf u})$ with $(\mathbf w, \mathbf u) \in \mathbb Q_B^{2n-k-1}$.
+
+**The protocol.**
+
+1. $\mathsf V$ uniformly samples a prime $q$ of $\Omega(\lambda)$ bits.
+2. **Bad-denominator branch.** If $(\mathbf w, \mathbf u) \notin \mathbb Z_{(q)}^{2n-k-1}$ — i.e. some entry's denominator is divisible by $q$ — $\mathsf P$ tells $\mathsf V$ which entry. $\mathsf V$ verifies via an oracle query and accepts.
+3. **Otherwise.** $\mathsf P$ and $\mathsf V$ run a PIOP over $(\mathbb Z_{(q)})_B$ for the projected relation $\phi_q(\mathsf{REL}_{\mathsf{R1CS}\ell, \mathbb Z_{(q)}})$, with prover input $(\mathbf x; \mathbf w)$ and verifier input $\mathbf x$.
+
+Step 3 is where all the actual work happens. Inside it, the protocol is essentially Spartan over $\mathbb F_q$ — sum-check on the R1CS constraint, polynomial-evaluation queries to the witness oracles, the works — with the small wrinkle that the extra $\phi_q(\mathbf m) \circ \phi_q(\mathbf u)$ term has to be incorporated into the sum-check polynomial. Prover and verifier compute on $\mathbb Z_{(q)}$ values throughout, but the _check_ at the end is over $\mathbb F_q$. Since both honest prover witnesses and verifier challenges are $\sim \lambda$-bit integers, no coefficient blow-up.
+
+**The bad-denominator branch looks suspicious.** It's not — and the reason is the next section. For now: a prover who genuinely has a witness in $\mathbb Q_B$ can only get unlucky on $q$ for a few primes (we'll bound how many), and a _cheating_ prover trying to hide a bad witness behind that branch is constrained by the same bound. Step 2 is a mathematical convenience that makes the soundness analysis clean, not a back door.
+
+The takeaway for an engineer: from here forward, Zinc-PIOP looks like _one ordinary $\mathbb F_q$-Spartan run_, plus a random-prime sample at the top. No exotic IOP plumbing inside.
+
+## Why It's Knowledge-Sound
+
+Knowledge soundness is the statement that whenever a prover convinces $\mathsf V$, an extractor can pull a valid witness out of them. The whole construction stands or falls on **one lemma**.
+
+**The setup.** Suppose a malicious $\mathsf P^*$ convinces $\mathsf V$ with non-negligible probability. Inside Step 3, the inner PIOP for $\phi_q(\mathsf{REL}_{\mathsf{R1CS}\ell, \mathbb Z_{(q)}})$ has its own knowledge soundness, so an extractor pulls $(\mathbf w^*, \mathbf u^*) \in \mathbb Z_{(q)}^{2n-k-1}$ satisfying the _projected_ constraint. Two cases:
+
+- **Lucky case.** $(\mathbf x; \mathbf w^*) \in \mathsf{REL}_{\mathsf{R1CS}\ell, \mathbb Q}$. The constraint already holds over $\mathbb Q$. Done.
+- **Bad case.** It only holds modulo $q$. There's some non-zero $\mathbf v_q \in \mathbb Z_{(q)}^n$ with
+
+$$A \mathbf z^T \circ B \mathbf z^T - C \mathbf z^T - \mathbf m^T \circ \mathbf u^T \;=\; q \cdot \mathbf v_q.$$
+
+Call the left-hand side $Q(\mathbf z)$. It's zero modulo $q$ but nonzero over $\mathbb Q$. We want: how many primes $q$ can a fixed $\mathbf z$ make this happen for? If only $\mathrm{poly}(\lambda)$ many, then the random-prime sampling catches the cheat with overwhelming probability.
+
+**Integer warm-up.** Suppose for a moment that $\mathbf z, \mathbf u$ and the bad-case vectors are integral. Let $I$ be the set of primes that satisfy the bad-case equation. Then $Q(\mathbf z)$ is divisible by every prime in $I$ simultaneously, so
+
+$$Q(\mathbf z) = \left(\prod_{q \in I} q\right) \cdot \mathbf v_I$$
+
+for some nonzero integer vector $\mathbf v_I$. Some entry $Q(\mathbf z)_i$ has bit-size at least $\sum_{q \in I} \log q \approx \lambda \cdot |I|$. But $Q(\mathbf z)_i$ is a polynomial expression in the entries of $\mathbf z, \mathbf u, A, B, C$, all of which are bounded by $B = \mathrm{poly}(\lambda)$ bits. Polynomial expressions of bounded-bit-size inputs have bounded-bit-size outputs, so $\lambda \cdot |I| \leq \mathrm{poly}(\lambda)$, which means $|I| \leq \mathrm{poly}(\lambda)$ (dividing a polynomial in $\lambda$ by $\lambda$ stays polynomial). With $\mathsf V$ sampling from $|\mathcal P| = O(2^\lambda)$ primes, the probability of landing in $I$ is at most $\mathrm{poly}(\lambda)/2^\lambda$ — negligible.
+
+**Lemma 2.1 (informal).** The general statement, lifted to $\mathbb Q$:
+
+> Let $P(\mathbf Y) = P(Y_1, \ldots, Y_\mu)$ be a polynomial with coefficients in $\mathbb Z_B$. Let $I$ be a set of primes of bit-size at least $\lambda$, and let $\mathbf y \in \mathbb Q_B^\mu$ be such that $\mathbf y \in \mathbb Z_{(q)}^\mu$ for all $q \in I$. Assume $\phi_q(P(\mathbf y)) = 0$ for every $q \in I$. Then some entry of $\mathbf y$ has bit-size at least
+>
+> $$\frac{\lambda \cdot |I| - (B + 2^{\deg_p(P)})}{\deg_p(P)},$$
+>
+> where $\deg_p(P) = \sum_i \deg_{Y_i}(P)$ is the sum of $P$'s partial degrees (the per-variable degree summed across all $\mu$ variables).
+
+Read it contrapositively: **if every entry of $\mathbf y$ has bit-size at most $B$, then $|I|$ is at most $\mathrm{poly}(\lambda)$**. Many simultaneous "bad" primes force at least one entry of the witness to be huge. A bounded-bit-size witness can only fool $\mathrm{poly}(\lambda)$-many primes.
+
+**Why this is the load-bearing lemma.** Without it, an adversary could construct fractional witnesses that satisfy the projected constraint modulo _many_ primes — in the worst case, every prime — and the random-prime check would catch nothing. Lemma 2.1 says: the bad-prime set $I$ has $\mathrm{poly}(\lambda)$ size _as long as the witness entries are bit-size-bounded_. Combined with $\mathsf V$ sampling from $2^\lambda$ primes, soundness follows.
+
+**The same logic handles Step 2.** If many primes $q$ divided the denominator of some $(w_i, u_i)$, that entry would have to be a fraction with a denominator of bit-size at least $\sum_q \log q$. But entries are $B$-bounded, so this can happen for at most $\mathrm{poly}(\lambda)$ primes — Step 2 is reachable for at most negligibly many random $q$. The branch is not exploitable.
+
+**The catch.** Lemma 2.1's bound depends on the witness having bounded bit-size in the first place. If a malicious prover sends arbitrarily-large fractions, the lemma gives no useful bound. So Zinc-PIOP only proves $\mathsf{REL}_{\mathsf{R1CS}\ell, \mathbb Q}$ — soundness _assumes_ the prover is using bounded entries. To prove the integer relation, we need to actively force the witness to be a bounded integer.
+
+## Forcing Integer Witnesses with a Lookup
+
+Lemma 2.1 only bites when the witness is bit-size-bounded. The Zip PCS in Part 2 will guarantee this for _committed_ polynomials, and a lookup argument bridges from "bounded rational" to "bounded integer."
+
+**Lookup, lifted.** A lookup relation asserts that every entry of a witness vector $\mathbf a$ appears somewhere in a public table $\mathbf t$. Formally,
+
+$$\mathsf{REL}_{\mathsf{Look}, \mathbb Q} = {(\mathbf x; \mathbf w) : \mathbf a \in \mathbb Q_B^{n_a}, \mathbf t \in \mathbb Q_B^{n_t}, \\{a_i\\} \subseteq \\{t_j\\}\\}.$$
+
+The same lifting trick works: define a projected version $\phi_q(\mathsf{REL}_{\mathsf{Look}, \mathbb Z_{(q)}})$, build a PIOP over $\mathbb F_q$ for it (any of the standard lookup arguments — Lasso, LogUp), and wrap it in the same Protocol-1-shaped construction.
+
+**The key choice.** Set $\mathbf t = [-2^B + 1, 2^B - 1]$ — the table contains every integer of bit-size less than $B$. Set $\mathbf a$ to be the R1CSℓ witness $\mathbf w$. Then any $\mathbf w$ that satisfies the lookup is forced to be an integer in the bounded range.
+
+Combining the two PIOPs gives a PIOP over $\mathbb Q_B$ for $\mathsf{REL}_{\mathsf{R1CS}\ell, \mathbb Z}$:
+
+```text
+Protocol 2 (informal):
+  1. P, V execute Zinc-PIOP for the R1CSℓ-over-Q relation.
+  2. P, V execute the lifted lookup-PIOP, with table = [-2^B+1, 2^B-1]
+     and a = w (the R1CSℓ witness).
+  3. Accept iff both pass.
+```
+
+**The cost wrinkle.** The table has size $\sim 2^{B+1}$, which is astronomical for $B \approx 2\lambda \approx 256$. No prover writes that table down. In practice, this is instantiated using **structured-table** lookup arguments (Lasso's SOS decomposition is the paper's reference), which exploit the regular structure of $[-2^B+1, 2^B - 1]$ to keep the prover work proportional to the witness size, not the table size. The structured-table machinery is a separate concern — we'll defer the details to Part 2 when we put the full system together.
+
+## Where We Stand
+
+Here's the stack we've built, end to end:
+
+- **R1CSℓ relation.** Lifts modular R1CS to integer arithmetic with arbitrary, possibly per-row moduli. A single statement can mix $2^{32}$, $2^{64}$, and prime moduli.
+- **Localization $\mathbb Z_{(q)}$ + projection $\phi_q$.** A subring of $\mathbb Q$ that admits a clean ring homomorphism to $\mathbb F_q$. Lets us run "modulo $q$" sum-check inside a relation that lives over $\mathbb Q$.
+- **Zinc-PIOP (Protocol 1).** Sample a random prime $q$, then run a Spartan-shaped PIOP for the projected relation over $\mathbb Z_{(q)}$. Inside: ordinary sum-check on $\sim \lambda$-bit integers.
+- **Lemma 2.1.** The pigeonhole-flavored bound that makes random-prime soundness work: a bit-size-bounded witness can fool at most $\mathrm{poly}(\lambda)$ primes. Without it, the construction falls apart.
+- **Lookup over $[-2^B+1, 2^B-1]$.** Forces the witness to be a bounded integer — the precondition Lemma 2.1 needs.
+
+Cost-wise, all the prover work happens inside the inner PIOP over $\mathbb F_q$. Prover and verifier handle integers of $\sim \lambda$ bits throughout. From a system-builder's perspective, Zinc-PIOP is "Spartan plus a random-prime header" — and it now handles statements over $\mathbb Z$, with multi-modulus support, at zero arithmetization overhead.
+
+## Why We're Not Done Yet
+
+The catch: Zinc-PIOP is a PIOP, not a real argument. Compiling it requires a polynomial commitment scheme that:
+
+- Works over $\mathbb Q_B$, not $\mathbb F_q$.
+- Extracts to **bounded-bit-size** rational coefficients — Lemma 2.1's precondition. A generic $\mathbb Q$-PCS gives unbounded extraction; we need the boundedness as a soundness property.
+- Doesn't use hidden-order groups.
+
+That PCS is **Zip**, the second main component of the Zinc paper. Zip is built around a new primitive called an **IOP of Proximity to the Integers** (IOPP-to-$\mathbb Z$), analogous to the IOPs of proximity to a code that underpin FRI and Brakedown. Where a code-IOPP guarantees the prover knows a word _close to_ a codeword, an integer-IOPP guarantees the prover knows a word _close to_ an integer vector.
+
+Part 2 will cover:
+
+- **Zip's commit and test phase**, a Brakedown variant adapted to $\mathbb Q$.
+- **The IOP of Proximity to the Integers**, the new primitive and how it slots into Zip.
+- **Two combinatorial lemmas about random rational linear combinations** — the engine of Zip's soundness, generalizing the Brakedown random-linear-combination check to $\mathbb Q$.
+- **JEA codes** (Juxtaposed Expand-Accumulate), the linear code over $\mathbb Q$ that Zip uses, descended from the EA codes of Block et al. (BFK+24).
+- **The extractor**, including the technical wrinkle that committed words can be arbitrary bit-strings, so the extractor is _expected_ polynomial time, not strict.
+- **Compilation via COS**, putting the full Zinc-PIOP + Zip + iCOS/iBCS pipeline together to produce the final hash-only succinct argument.
+
+Continue to Part 2 (forthcoming).
+
+## References
+
+- **Zinc (this paper)**: Garreta, A., Waldner, H., Hristova, K., Dall'Ava, L. (2025). "Zinc: Succinct Arguments with Small Arithmetization Overheads from IOPs of Proximity to the Integers." Nethermind Research.
+- **CHA24 (mod-AHP)**: Campanelli, M., Hall-Andersen, M. (2024). "Fully-succinct arguments over the integers from first principles." [https://eprint.iacr.org/2024/1548](https://eprint.iacr.org/2024/1548)
+- **Spartan**: Setty, S. (2020). "Spartan: Efficient and general-purpose zkSNARKs without trusted setup." CRYPTO 2020. [https://eprint.iacr.org/2019/550](https://eprint.iacr.org/2019/550)
+- **Brakedown**: Golovnev, A., Lee, J., Setty, S., Thaler, J., Wahby, R. S. (2023). "Brakedown: Linear-time and field-agnostic SNARKs for R1CS." CRYPTO 2023.
+- **BHR+21 (integer PCS)**: Block, A. R., Holmgren, J., Rosen, A., Rothblum, R. D., Soni, P. (2021). "Time- and space-efficient arguments from groups of unknown order." CRYPTO 2021.
+- **BFS20 (DARK)**: Bünz, B., Fisch, B., Szepieniec, A. (2020). "Transparent SNARKs from DARK compilers." EUROCRYPT 2020.
+- **BFK+24 (EA codes)**: Block, A. R., Fang, Z., Katz, J., Thaler, J., Waldner, H., Zhang, Y. (2024). "Field-agnostic SNARKs from expand-accumulate codes." CRYPTO 2024.
+- **Stwo (HLP24)**: Haböck, U., Levit, D., Papini, S. (2024). "Stwo: a STARK prover."
+- **SuperSpartan / CCS**: Setty, S., Thaler, J., Wahby, R. (2023). "Customizable Constraint Systems for Succinct Arguments."
+- **Lasso**: Setty, S., Thaler, J., Wahby, R. (2023). "Unlocking the lookup singularity with Lasso."
+- **LogUp**: Papini, S., Haböck, U. (2023). "Improving logarithmic derivative lookups using GKR."
