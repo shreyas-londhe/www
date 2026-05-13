@@ -1,0 +1,277 @@
+---
+layout: ../../components/blog-post.astro
+title: "Zinc II: Compiling the PIOP with Zip — A Brakedown PCS Over the Rationals"
+description: "Part 2 of the Zinc walkthrough. We build Zip — a Brakedown-style PCS over ℚ — from an IOP of Proximity to the Integers and a JEA linear code that survives the move from 𝔽_q."
+pubDate: "2026-05-05"
+tags: ["zero-knowledge", "snarks", "integer-arithmetic"]
+---
+
+## Where Part 1 Left Off
+
+[Part 1](/writing/zinc-part-1) built **Zinc-PIOP**: a polynomial interactive oracle proof over $\mathbb Q$ for integer-arithmetic relations. It worked by lifting R1CS to $\mathbb Z$ (the R1CSℓ relation), then using a verifier-sampled random prime $q$ to project the constraint through $\phi_q: \mathbb Z_{(q)} \to \mathbb F_q$ and run a Spartan-shaped sum-check inside $\mathbb F_q$. Lemma 2.1 was the load-bearing piece — bounded-bit-size witnesses can fool only $\mathrm{poly}(\lambda)$-many primes, so the random-prime sampling catches cheats with overwhelming probability.
+
+But a PIOP isn't a real argument. To compile, we need a polynomial commitment scheme that:
+
+- **Works over $\mathbb Q_B$**, not $\mathbb F_q$. The PIOP's witness is a multilinear polynomial with rational coefficients.
+- **Extracts to bounded-bit-size rationals.** Lemma 2.1's preconditions need entry bit-sizes capped — a generic $\mathbb Q$-PCS gives unbounded extraction, which kills soundness.
+- **Doesn't use hidden-order groups.** The whole point of Zinc was to dodge the RSA-style assumptions CHA24 inherits.
+
+That PCS is **Zip**. It's a Brakedown variant — Merkle commitments over rows of an encoded coefficient matrix — built around a new primitive: the **IOP of Proximity to the Integers**. Plus a new linear code, **JEA** (Juxtaposed Expand-Accumulate), specifically designed to survive the move from finite fields to $\mathbb Q$.
+
+In this part: what Zip's contract looks like, the commit / test / eval phases, the two combinatorial lemmas (2.4 and 2.5) that drive its soundness, JEA codes, the extractor wrinkle, and how the whole pipeline compiles to a hash-only succinct argument via iCOS.
+
+## What Zip Has To Achieve
+
+Zip is a multilinear PCS — committing to $f \in \mathbb Q_B^{\mathrm{multilin}}[\mathbf X]$ — with one notable asymmetry between completeness and soundness.
+
+**The contract:**
+
+- **Honest provers commit polynomials with integer coefficients of bit-size $< B'$**, for some $B' < B$. Completeness only holds in this regime.
+- **The extractor pulls back any rational polynomial of bit-size $< B$.** Soundness operates in this larger range.
+
+This gap between $B'$ and $B$ is governed by
+
+$$B = 2 \cdot B' + (6 \cdot \dim + 2) \cdot (\lambda + \log \dim)$$
+
+where $\dim = 2^{\mu/2}$ is the side-length of the coefficient matrix (we'll see why this shape in a moment).
+
+**The IOP-of-Proximity-to-the-Integers analogy.** The structure is exactly that of an IOPP-to-a-code. There, the honest prover sends a codeword, but the scheme only guarantees that a passing prover sent something *close to* a codeword — close enough that distance-decoding pins down a unique nearby codeword. Zip plays the same game with integers: the honest prover sends an integral polynomial in $\mathbb Z_{B'}$, but the scheme only guarantees that a passing prover sent something *close to* integral — close enough, where "close" means "rational with bounded bit-size."
+
+{/* TODO: export /diagrams/zinc-iopp-to-z.svg from zinc-iopp-to-z.excalidraw
+<img
+  src="/diagrams/zinc-iopp-to-z.svg"
+  alt="Two side-by-side fuzzy-ball diagrams. Left: traditional IOPP-to-code — a fuzzy ball labeled 'words δ-close to C', with codewords as dots inside, an arrow showing the prover's claimed word landing inside the ball. Right: IOPP-to-Z — a fuzzy ball labeled 'rationals close to integers (Q_B)', with integer points as dots, the honest prover's Z_B' vector inside. Same ball-and-arrows shape, different notion of 'close'."
+/>
+*/}
+
+This dual nature matters because Zip is *both* an IOPP-to-a-code (in its underlying linear code over $\mathbb Q$) *and* an IOPP-to-$\mathbb Z$ (via the bit-size check). The two checks slot together cleanly, as we'll see.
+
+## The Commit Phase
+
+If you've worked with Brakedown, the commit phase is what you'd guess. Reshape the polynomial's coefficients into a square matrix, encode each row with a linear code, Merkle-commit each encoded row independently. Done.
+
+**Setup.** Take a multilinear polynomial $f(X_1, \ldots, X_\mu)$ with $\mu$ even and coefficients in $\mathbb Q_B$. Set $\dim = 2^{\mu/2}$.
+
+**Step 1.** Organize $f$'s evaluations on the boolean hypercube $\\{0, 1\\}^\mu$ into a $\dim \times \dim$ matrix $\mathbf v^f$. Each row $\mathbf v_i^f$ is a length-$\dim$ vector of $\mathbb Q_B$ entries. (This is the standard tensor split for multilinear polynomials: writing $\mathbf q = (\mathbf q^{(1)}, \mathbf q^{(2)})$ with each half of length $\mu/2$, the evaluation factors as $f(\mathbf q) = \mathbf q_1 \cdot \mathbf v^f \cdot \mathbf q_2^T$ where $\mathbf q_1, \mathbf q_2 \in \mathbb Q^{\dim}$ are the equality-coefficient vectors $\widetilde{\mathsf{eq}}(\mathbf x; \mathbf q^{(1)})_{\mathbf x \in \\{0,1\\}^{\mu/2}}$ and $\widetilde{\mathsf{eq}}(\mathbf x; \mathbf q^{(2)})_{\mathbf x \in \\{0,1\\}^{\mu/2}}$. See [Spartan article](/writing/spartan-protocol) for the underlying multilinear-extension machinery.)
+
+**Step 2.** Encode each row with the underlying linear code $\mathcal C_\lambda$ over $\mathbb Q$:
+
+$$\mathsf{Enc}_{\mathcal C_\lambda}(\mathbf v_i^f) \in \mathbb Q^{\mathsf n}$$
+
+where $\mathsf n$ is the code length. We'll cover what code in §JEA — for now, treat it as a black box that takes a $\dim$-vector and produces an $\mathsf n$-vector with good distance properties.
+
+**Step 3.** Merkle-commit each encoded row independently. The commitment is the tuple
+
+$$\mathsf{cm} = \big(\mathsf{Commit}(\mathsf{Enc}_{\mathcal C_\lambda}(\mathbf v_i^f))\big)_{i \in [\dim]}$$
+
+— $\dim$ separate Merkle roots.
+
+The structural difference from Brakedown is that $\mathcal C_\lambda$ is a code *over $\mathbb Q$*, not over $\mathbb F_q$. Everything else looks identical. Prover work is dominated by encoding $\dim$ rows; per-row encoding is a $\dim$-by-$\mathsf n$ generator-matrix multiplication.
+
+## The Testing Phase
+
+Testing is where Zip earns the "IOP of Proximity to the Integers" name. The phase is Brakedown's standard random-linear-combination check, with **one new step**: a bit-size + integrality check on the prover's response.
+
+**Protocol 9 walkthrough.**
+
+1. $\mathsf V$ uniformly samples $r_1, \ldots, r_{\dim} \in [0, q_0 - 1]$, where $q_0$ is a *fixed, public* prime of $\Omega(\lambda)$ bits — distinct from the per-execution random prime $q$ that shows up later in the eval phase. (For exposition, think of the $r_i$'s as $\sim\lambda$-bit small integers; the prime-interval choice is a technical detail that makes a few lemmas cleaner.)
+2. $\mathsf P$ sends $\bar{\mathbf v} = \sum_{i \in [\dim]} r_i \cdot \mathbf v_i^f \in \mathbb Q^{\dim}$.
+3. **(The new step.)** $\mathsf V$ rejects if any entry $\bar v_j$ is **not an integer** or has $|\bar v_j| > \dim \cdot q_0 \cdot 2^{B'}$ — i.e., it's outside the allowed bit-size band.
+4. $\mathsf V$ samples a random subset $J \subseteq [\mathsf n]$ with $|J| = \Theta(\lambda)$. For each $j \in J$:
+   - Open the Merkle commitments at column $j$, yielding $\hat u_{1,j}, \ldots, \hat u_{\dim, j}$. Reject if any $\hat u_{i,j}$ is not an integer of the expected bit-size.
+   - Check $\mathsf{Enc}_{\mathcal C_\lambda}(\bar{\mathbf v})_j = \sum_i r_i \cdot \hat u_{i,j}$.
+
+Step 1, 2, 4 are exactly Brakedown. Step 3 is the addition.
+
+{/* TODO: export /diagrams/zinc-zip-testing.svg from zinc-zip-testing.excalidraw
+<img
+  src="/diagrams/zinc-zip-testing.svg"
+  alt="Horizontal flowchart of Zip's testing phase. Left: dim Merkle roots (committed encoded rows). V samples r_1..r_dim (small-integer challenges, drawn as small chips). P sends v-bar (length-dim vector). V's two checks: (a) bit-size band — is each entry an integer with magnitude under dim·q_0·2^B_v? (b) random column opens — for j in J, check that Enc_C(v-bar)_j equals sum_i r_i·u-hat_{i,j}. Both pass: testing phase succeeds."
+/>
+*/}
+
+**What each step buys.** Steps 1, 2, 4 are Brakedown's correlated-agreement check: except with negligible probability (e.w.n.p.), they guarantee that every $\hat{\mathbf u}_i$ is $\delta$-close to a unique codeword $\mathsf{Enc}_{\mathcal C_\lambda}(\mathbf v_i)$. So far, that's just the usual "prover committed to *some* codeword in each row."
+
+Step 3 — the bit-size + integrality check — does the new work. It guarantees, e.w.n.p., that those underlying $\mathbf v_i$ vectors are not just rationals but **bounded rationals**: $\mathbf v_i \in \mathbb Q_B^{\dim}$. **This is the IOPP-to-$\mathbb Z$ part of Zip.**
+
+By the time the testing phase passes, $\mathsf V$ knows the prover is committed to bit-size-bounded rational row vectors. That's exactly the precondition Lemma 2.1 (from Part 1) needs to upgrade $\phi_q$-projected constraints into $\mathbb Q$-level constraints during the eval phase. The two phases interlock.
+
+## Why The Bit-Size Check Works
+
+The Step 3 check is a single integer comparison. It does most of Zip's $\mathbb Q$-soundness work. Why does so little buy so much? Two combinatorial lemmas about random rational linear combinations.
+
+**Lemma 2.4 (informally — "random LC of large rationals stays large").** Paper Lemma 5.7. Let $\mathbf v = (v_1, \ldots, v_n) \in \mathbb Q^n$, not all zero, let $N > 0$, and let $M > 1$ be a positive integer. Sample $r_1, \ldots, r_n$ uniformly from $[0, M - 1]$. Then
+
+$$\Pr\!\left[\,\Bigl|\sum_i r_i v_i\Bigr| < N\,\right] \;\leq\; \min\!\left\{1, \frac{N}{\\|\mathbf v\\|_\infty \cdot M}\right\}.$$
+
+Translation: a random small-integer linear combination of rationals where one is large is unlikely to be small. The denominator $\\|\mathbf v\\|_\infty \cdot M$ dominates if $\\|\mathbf v\\|_\infty$ is large.
+
+**Lemma 2.5 (informally — "random LC of fractions rarely lands on an integer").** Paper Lemma 5.8. Let $\mathbf v \in \mathbb Q^n$, not all zero, where each $v_i = a_i / b_i$ in lowest form. Let $M \geq 1$, and assume some index $i$ has both $b_i > M$ and $v_i \neq 0$ — one entry that is both nonzero and has a denominator exceeding $M$. Then
+
+$$\Pr\!\left[\,\sum_i r_i v_i \in \mathbb Z \,\Big|\, r_i \xleftarrow{\$} [0, M - 1]\,\right] \;\leq\; \frac{1}{M}.$$
+
+Translation: a random LC of rationals where one has a large denominator rarely yields an integer.
+
+**How they combine.** Step 3 demands the LC be both an integer *and* small. Lemma 2.5 says: if any $\mathbf v_i$ entry has a denominator larger than $M$, the LC is hardly ever an integer. So passing Step 3 forces denominators bounded by $M = q_0 \approx 2^\lambda$ e.w.n.p. Given small denominators, Lemma 2.4 says: if any $\mathbf v_i$ entry has a large numerator, the LC's magnitude blows past $\dim \cdot q_0 \cdot 2^{B'}$. So passing Step 3 also forces numerators bounded.
+
+Combine the two and entries are pinned to $\mathbb Q_B$. This is what justifies the constant in the $B = 2 B' + (6 \dim + 2)(\lambda + \log \dim)$ formula — the multiplicative slack absorbs the bit-size growth from Lemma 2.4's combinatorial factor.
+
+These are the $\mathbb Q$-analogs of Brakedown's correlated-agreement / proximity-gap lemmas. Brakedown needs random LCs of "close-to-codeword" words to remain close to a codeword. Zip needs random LCs of large rationals to remain large, and random LCs of fractions to rarely be integers. Same kind of combinatorial statement; different ring.
+
+|                       | Brakedown (over $\mathbb F_q$)                | Zip (over $\mathbb Q$)                              |
+| --------------------- | --------------------------------------------- | --------------------------------------------------- |
+| Soundness lever       | Random LC of close-to-codeword stays close    | Random LC of large rationals stays large (2.4)      |
+| Extra lever           | (none — distance handles everything)          | Random LC of fractions rarely integer (2.5)         |
+| Probability dominator | Field size $|\mathbb F_q|$                  | Sampling interval $M = q_0$                          |
+
+## The Evaluation Phase
+
+The eval phase proves a claim $f(\mathbf q) = y$ for a query point $\mathbf q \in \mathbb Z_B^\mu$ and value $y \in \mathbb Z$. The protocol is "Brakedown's eval, but every check is done modulo a verifier-sampled random prime."
+
+**Protocol 8 walkthrough.**
+
+1. $\mathsf V$ samples a random $\Omega(\lambda)$-bit prime $q \in \mathcal P_\lambda$ and sends it to $\mathsf P$.
+2. **Bad-denominator branch.** If any $\mathbf v_i^f$ has an entry whose denominator is divisible by $q$ — i.e., $\mathbf v_i^f \notin \mathbb Z_{(q)}^{\dim}$ — $\mathsf P$ aborts. (Same shape as Zinc-PIOP's Step 2 from [Part 1](/writing/zinc-part-1#why-its-knowledge-sound). The escape hatch is bounded by the same Lemma-2.1 logic: a fixed bit-size-bounded witness can have at most $\mathrm{poly}(\lambda)$ primes dividing any of its denominators, so this branch fires for only negligibly many random $q$.)
+3. Otherwise, $\mathsf P$ uses the tensor identity $f(\mathbf q) = \mathbf q_1 \cdot \mathbf v^f \cdot \mathbf q_2^T$ with $\mathbf q_1, \mathbf q_2 \in \mathbb Z^{\dim}$, and sends the **projected partial sum**
+
+$$\bar{\mathbf v}_q = \sum_{i \in [\dim]} \phi_q(\mathbf q_{1,i}) \cdot \phi_q(\mathbf v_i^f) \in \mathbb F_q^{\dim}.$$
+
+4. $\mathsf V$ samples $J \subseteq [\mathsf n]$ with $|J| = \Theta(\lambda)$. For each $j \in J$:
+   - Open the Merkle commitments at column $j$, yielding $\hat u_{1,j}, \ldots, \hat u_{\dim, j}$. Reject if any $\hat u_{i,j}$ is not an integer of the expected bit-size.
+   - **Code-consistency check:** $\mathsf{Enc}_{\mathcal C_{\lambda, q}}(\bar{\mathbf v}_q)_j = \sum_i \phi_q(\mathbf q_{1,i}) \cdot \phi_q(\hat u_{i,j})$, where $\mathcal C_{\lambda, q} = \phi_q(\mathcal C_\lambda)$ is the projected code.
+   - **Final eval check:** $\phi_q(y) = \sum_i \bar v_{q, i} \cdot \phi_q(\mathbf q_{2, i})$.
+
+**Two soundness arguments.** The code-consistency check, by Brakedown's argument applied to the projected code $\phi_q(\mathcal C_\lambda)$, gives e.w.n.p. that $\bar{\mathbf v}_q = \sum_i \phi_q(\mathbf q_{1,i}) \cdot \phi_q(\mathbf v_i^f)$. This is why the projected code needs good distance — JEA codes are designed for exactly this property (next section).
+
+The final eval check then gives $\phi_q(y) = \phi_q(f(\mathbf q))$. To upgrade from "$\phi_q$-equality for this particular $q$" to "$\mathbb Q$-equality" — what we actually want — **we invoke Lemma 2.1 from Part 1**. That lemma needs bit-size-bounded $\mathbf v$ entries. The testing phase delivers them. The two phases are interlocked: testing pins entry bit-sizes, eval rides Lemma 2.1 on top of that bound.
+
+## JEA Codes: A Linear Code That Survives Over $\mathbb Q$
+
+Every Brakedown-style PCS rests on a code with good distance and cheap encoding. Over $\mathbb F_q$ that's a solved problem — Brakedown's recursive code, Basefold's, Reed–Solomon. Over $\mathbb Q$, the standard tricks fail.
+
+**Why standard codes break.** Brakedown's and Basefold's codes are built recursively via iterative matrix multiplications, with random *field* elements at each level. Over $\mathbb F_q$, those are $\log q$-bit. Naively translating to $\mathbb Z$ — replacing field elements with integers — produces matrices whose entries blow up to thousands of bits after a few recursion levels. Encoding then requires huge-integer multiplications, defeating the whole purpose.
+
+Reed–Solomon works over any ring, but encoding is $O(\mathsf n \log \mathsf n)$ via FFT — fine for runtime but kills the linear-time-prover benefit Brakedown buys you.
+
+**JEA's answer: keep the matrix sparse with small entries.** Adapted from [BFK+24]'s expand-accumulate codes, drawing randomness from $[0, s - 1] \subset \mathbb Z$ instead of $\mathbb F_q$.
+
+Picture two stacked sparse integer matrices: each row has only $O(\log n)$ nonzero entries, all of which are small ($\sim \log s$ bits). Encoding becomes a sparse-matrix-vector multiply with bounded-bit numbers — no recursion, no field elements, no bit-size blowup.
+
+**Construction (Definition 6.1).** Let $n, d \geq 1$. Let $A \in \mathbb Z^{n \times n}$ be the upper-triangular all-ones accumulator matrix. Let $S = [0, s - 1]$ for some integer $s > 1$.
+
+- $E_1 \in \mathbb Z^{d \times n}$: each row sampled from $\mathsf{BP}(d, n, t, S)$ — uniformly from weight-$t$ vectors with nonzero entries in $S$, where $t = \gamma \log n$.
+- $E_2 \in \mathbb Z^{d \times n}$: each entry sampled from a generalized Bernoulli, nonzero (drawn from $S$) with probability $p = t / n$.
+
+Form $M_{\mathsf{BP}} = E_1 \cdot A$ and $M_{\mathsf{Ber}} = E_2 \cdot A$. Two integer linear codes $\mathcal C_{\mathsf{BP}}, \mathcal C_{\mathsf{Ber}}$ over $\mathbb Q$. The **JEA code** is the concatenation:
+
+$$\mathsf{Enc}_{\mathcal C_{\mathsf{JEA}}}(\mathbf v) = (\mathbf v \cdot M_{\mathsf{BP}}) \,\|\, (\mathbf v \cdot M_{\mathsf{Ber}}).$$
+
+Length $2n$, dimension $d$.
+
+**Why this works over $\mathbb Q$.** $M_{\mathsf{BP}}$ and $M_{\mathsf{Ber}}$ are sparse (because $E_1, E_2$ are), and nonzero entries have $\sim \log s$ bits. Encoding a $B'$-bit-entry integer vector costs $B'$-bit-by-$\log s$-bit multiplications and $\sim (B' + \log s)$-bit additions. No bit-size blowup.
+
+**Projection requirement.** The eval phase calls $\mathsf{Enc}_{\mathcal C_{\lambda, q}} = \mathsf{Enc}_{\phi_q(\mathcal C_\lambda)}$ — the code projected modulo a random $q$. Brakedown's column-consistency soundness relies on the projected code having good distance. Theorem 6.5 establishes this: as long as $s$ is large enough, the entries of $M_{\mathsf{BP}}, M_{\mathsf{Ber}}$ projected mod $q$ look uniform in $\mathbb F_q$ (e.w.n.p. over the choice of $q$). The projected code is then essentially a JEA code over $\mathbb F_q$, which is exactly what [BFK+24] analyzed.
+
+**The parameter $s$.** Per Remark 6.7, $s \approx 2^{4\lambda}$ suffices. The factor $4$ comes from a Markov-bound chain in the projection-error analysis; Remark 6.8 conjectures it can be sharpened to $2^{2\lambda}$ or smaller via better concentration. Operationally, $s$ controls the bit-width of generator-matrix entries — $4\lambda$ bits is fine, $2\lambda$ would be tighter.
+
+|                | Brakedown's recursive   | Basefold's        | Reed–Solomon    | **JEA (Zip)**          |
+| -------------- | ----------------------- | ----------------- | --------------- | ---------------------- |
+| Encoding speed | Linear-time             | Linear-time       | $O(\mathsf n \log \mathsf n)$ | **Linear-time, sparse** |
+| Matrix entries | Random $\mathbb F_q$    | Random $\mathbb F_q$ | Polynomial evals | **$\log s \approx 4\lambda$ bits** |
+| Survives $\mathbb Q$? | No — entries blow up    | No — entries blow up | Yes, but slow   | **Yes**                |
+
+## The Extractor And The Expected-Polytime Wrinkle
+
+Every PCS soundness story needs an extractor. Zip's has a quirk that doesn't show up in finite-field schemes.
+
+**The wrinkle.** In any code-based PCS, a malicious prover can replace some entries of the committed word $\hat{\mathbf u}_i$ with arbitrary bit-strings — the Merkle tree commits to whatever bits the prover hashes in. Over a finite field $\mathbb F$, those bit-strings are at most $\log |\mathbb F| = O(\lambda)$ bits, so the extractor reads the entire entry at unit cost. **Over $\mathbb Q$, the prover can write an arbitrarily long bit-string into a single entry.** Reading it naively is not polynomial-time.
+
+**The fix (Protocol 11).** The extractor reads at most a fixed number of bits per entry — specifically $\log(\\|M_\mathcal C\\|_\infty \cdot \dim) + 2 B' + (6 \dim + 2) \log(q_0 \cdot \dim)$ bits, where $\\|M_\mathcal C\\|_\infty$ is the largest absolute value of any entry in the JEA generator matrix — and if the entry's encoding exceeds that, it records the position as a "$\perp$ disagreement" and moves on, instead of trying to read the rest.
+
+**Consequence.** The extractor runs in *expected* polynomial time, not strict polynomial time. This is fine: by Lindell's witness-extended emulation (Lin01), expected-polytime extraction is equivalent to standard knowledge soundness for our purposes, so the formal soundness statement still goes through.
+
+The rest of the extractor is a standard rewinding-style PCS extractor: sample challenges $\mathbf r$, run the prover, retry on failure, build up $\dim$ linearly independent successful challenges, invert to recover the witness. Just over $\mathbb Q$, with the bit-budget cap as the one new ingredient.
+
+## Compilation: The Pipeline
+
+Two pieces left: turning the PIOP-plus-PCS into an IOP, then turning that IOP into a succinct argument.
+
+**PIOP → IOP.** Replace each polynomial oracle $[[\tilde w]]$ in Zinc-PIOP with a Zip commitment — a tuple of Merkle roots over the encoded coefficient-matrix rows. Replace each polynomial-oracle query (which Zinc-PIOP issues during sum-check) with a Zip evaluation IOP execution (Protocol 8) certifying the queried value. Result: a regular hash-based IOP, no polynomial-oracle abstraction left.
+
+**IOP → succinct interactive argument via iCOS.** The COS transformation [COS20] compiles an IOP into a SNARK by Merkle-committing every oracle and applying Fiat–Shamir. It requires the underlying IOP to satisfy *state-restoration* knowledge soundness. Zip provides only standard knowledge soundness (the stronger property is left as future work in the paper), so we use **iCOS** — the *interactive* variant of COS, which skips the Fiat–Shamir step. The result is succinct *interactive*, not non-interactive.
+
+Beneath iCOS sits **iBCS** [CDGS23], the vector-commitment-based BCS variant. Both transformations are "Merkle-commit every oracle, answer queries via Merkle openings" — succinctness comes from Merkle path length being $O(\log \mathsf n)$ rather than $\mathsf n$.
+
+{/* TODO: export /diagrams/zinc-zip-pipeline.svg from zinc-zip-pipeline.excalidraw
+<img
+  src="/diagrams/zinc-zip-pipeline.svg"
+  alt="Horizontal flowchart: four boxes connected by arrows. Box 1: Zinc-PIOP (PIOP over Q). Arrow labeled 'replace polynomial oracles with Zip commitments'. Box 2: Compiled IOP (IOP over Q + Zip). Arrow labeled 'iCOS / iBCS — Merkle-commit oracles, answer via paths'. Box 3: Succinct interactive argument. Arrow labeled 'Fiat–Shamir on state-restoration variant — future work', drawn dashed. Box 4: SNARK (non-interactive)."
+/>
+*/}
+
+**The takeaway.** From the engineer's seat: "Zinc-PIOP → IOP via Zip → succinct interactive argument via iCOS → (eventually) SNARK via Fiat–Shamir." The final non-interactive step is open work — the paper flags state-restoration soundness as the missing piece (Section 2.4).
+
+## What This Buys You
+
+The full system, end-to-end:
+
+- **Hash-only.** Every cryptographic primitive is collision-resistant hashing. No hidden-order groups, no RSA assumptions, no pairings. The random oracle for Fiat–Shamir is the only model dependency, and that's standard for any hash-based SNARK.
+- **Plausibly post-quantum.** Nothing in the security argument relies on group cryptography. Subject to the random oracle being instantiable, the construction has a path to PQ security.
+- **Multi-modulus over $\mathbb Z$.** From Part 1's R1CSℓ structure. Zip plays no direct role here, but Zip is what *unlocks* it by removing the hidden-order-group dependency.
+
+**Concrete cost shape.** No benchmarks have been published yet (Section 2.4 of the paper flags implementation as ongoing work), so this is the asymptotic profile:
+
+- **Commit:** $\dim$ encodings of $\dim$-length integer vectors with a sparse JEA generator matrix. Roughly $O(\dim^2 \cdot t)$ small-integer operations where $t = \gamma \log \dim$.
+- **Test:** $\Theta(\lambda)$ Merkle openings per row, plus the random-LC + bit-size check.
+- **Eval:** $\Theta(\lambda)$ Merkle openings, plus a $\dim$-by-$\dim$ matrix-vector product modulo a random $\Omega(\lambda)$-bit prime.
+- **Bit-widths everywhere:** all operations bounded to $O(\lambda)$-bit or $O(B)$-bit integers. No thousand-bit arithmetic anywhere — that was the whole point.
+
+Extending Part 1's headline table:
+
+|                          | CHA24 (mod-AHP + BHR+21 PCS)        | **Zinc + Zip**                       |
+| ------------------------ | ----------------------------------- | ------------------------------------ |
+| PCS family               | Hidden-order group                  | Brakedown (hash + linear code)        |
+| Cryptographic assumption | RSA-style (groups of unknown order) | Collision-resistant hashing + ROM    |
+| Post-quantum             | No                                  | Plausibly yes                        |
+| Multi-modulus per stmt   | Yes                                 | Yes                                  |
+| Arithmetization overhead | None                                | None                                 |
+| Underlying linear code   | n/a                                 | JEA (sparse, small-entry)             |
+
+## What We Didn't Cover
+
+A short list of what's in the paper but not in this walkthrough:
+
+- **Full state-restoration soundness analysis** for Fiat–Shamir compilation — the paper calls this further work (§2.4). Without it, the final scheme is interactive, not non-interactive.
+- **Formal proofs of Lemmas 2.4 and 2.5** — paper §5.4.1.
+- **The general algebraic-relations machinery** (§4) — Zinc-PIOP works for any algebraic indexed relation, not just R1CSℓ. We focused on R1CSℓ throughout.
+- **The full extractor analysis** — Protocols 10 and 11 in §5.4.3, plus Lemma 5.24 on expected running time.
+- **JEA distance bounds** — §6, Theorem 6.5 and the chain of lemmas underneath. We stated the result; the analysis is several pages of Markov-bound chasing.
+- **Implementation and benchmarking** — flagged as ongoing in the paper.
+
+## Conclusion
+
+Five core ideas drive Zinc + Zip:
+
+1. **A Brakedown-style PCS over $\mathbb Q$ is possible** if you're careful about (a) what the prover commits to, (b) what the testing phase proves, (c) what code you use.
+2. **The IOPP-to-$\mathbb Z$ abstraction** — "prover knows a word close to integral" — slots cleanly into Brakedown's existing IOPP-to-code abstraction. Zip is both at once.
+3. **Two new combinatorial lemmas (2.4, 2.5)** replace Brakedown's correlated-agreement bounds in the $\mathbb Q$ setting. Easier to state than Brakedown's, in fact.
+4. **JEA codes** — sparse generator matrix, small entries — are a linear code that survives translation from $\mathbb F_q$ to $\mathbb Q$ without bit-size blowup. Most other linear codes don't.
+5. **iCOS** is the standard Merkle compilation step. Fiat–Shamir for non-interactivity is open work.
+
+What makes Zinc + Zip significant: it's the first **hash-only succinct argument for native integer-arithmetic statements**, with multi-modulus support at zero arithmetization overhead, and a plausibly post-quantum path. The construction recipe — "hash + linear code over $\mathbb Q$" — is clean, and unlocks a class of relations that previously required RSA-style assumptions to handle efficiently.
+
+The open theoretical question is sharpening the JEA projection-error analysis to drop $s$ from $2^{4\lambda}$ to $2^{2\lambda}$ (Remark 6.8) and shave constants. The open practical question is implementation — benchmarks against Brakedown over $\mathbb F_q$ are what'll show whether the bit-bookkeeping overhead is small enough in practice for the integer-arithmetic flexibility to pay off.
+
+## References
+
+- **Zinc (this paper)**: Garreta, A., Waldner, H., Hristova, K., Dall'Ava, L. (2025). "Zinc: Succinct Arguments with Small Arithmetization Overheads from IOPs of Proximity to the Integers." Nethermind Research.
+- **Part 1 of this walkthrough**: [Zinc I: A PIOP Over the Rationals That Bypasses Arithmetization](/writing/zinc-part-1).
+- **CHA24 (mod-AHP)**: Campanelli, M., Hall-Andersen, M. (2024). "Fully-succinct arguments over the integers from first principles." [https://eprint.iacr.org/2024/1548](https://eprint.iacr.org/2024/1548)
+- **Brakedown**: Golovnev, A., Lee, J., Setty, S., Thaler, J., Wahby, R. S. (2023). "Brakedown: Linear-time and field-agnostic SNARKs for R1CS." CRYPTO 2023.
+- **BFK+24 (EA codes over fields)**: Block, A. R., Fang, Z., Katz, J., Thaler, J., Waldner, H., Zhang, Y. (2024). "Field-agnostic SNARKs from expand-accumulate codes." CRYPTO 2024.
+- **BHR+21 (integer PCS)**: Block, A. R., Holmgren, J., Rosen, A., Rothblum, R. D., Soni, P. (2021). "Time- and space-efficient arguments from groups of unknown order." CRYPTO 2021.
+- **COS20 (COS transformation)**: Chiesa, A., Ojha, D., Spooner, N. (2020). "Fractal: Post-quantum and transparent recursive proofs from holography." EUROCRYPT 2020.
+- **CDGS23 (iBCS)**: Chiesa, A., Dall'Agnol, M., Guan, Z., Spooner, N. (2023). "On the security of succinct interactive arguments from vector commitments." [https://eprint.iacr.org/2023/1737](https://eprint.iacr.org/2023/1737)
+- **CY24**: Chiesa, A., Yogev, E. "Building Cryptographic Proofs from Hash Functions."
+- **Lin01 (witness-extended emulation)**: Lindell, Y. (2001). "Parallel Coin-Tossing and Constant-Round Secure Two-Party Computation."
+- **BSBHR18 (IOPP)**: Ben-Sasson, E., Bentov, I., Horesh, Y., Riabzev, M. (2018). "Fast Reed-Solomon Interactive Oracle Proofs of Proximity."

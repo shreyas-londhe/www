@@ -1,0 +1,351 @@
+---
+layout: ../../components/blog-post.astro
+title: "TensorSwitch II: Recursion, Right-Extensions, and the Numbers"
+description: "Part 2 of the TensorSwitch walkthrough — how the linear-query protocol from Part 1 gets compiled into a real PCS via recursion, what right-extensions are, and the full efficiency numbers"
+pubDate: "2026-04-17"
+tags: ["zero-knowledge", "snarks", "hash-based-pcs"]
+---
+
+## Where Part 1 Left Off
+
+In [Part 1](/writing/tensorswitch-part-1) we built TensorSwitch as an interactive oracle PCS in an idealized **linear query model**. The protocol is beautiful: the prover commits to a polynomial as a tensor codeword $F = C^2(M)$, and to check both malformedness and evaluations, the verifier runs $t \approx 4\lambda/\delta^2$ spot-check repetitions — each costing a single point query to $F$ plus a handful of cheap linear queries to small fresh oracles ($\mathsf{eval}$, $\mathsf{col}_i$, $\mathsf{ood}$).
+
+But there was a catch. Linear queries — "read $\langle v, w\rangle$ for an arbitrary weight vector in one step" — aren't something Merkle trees natively support. A real hash-based PCS only has point queries. So what we have is an IOPCS in a fictional world; the "linear query" superpower needs to be cashed out somehow.
+
+This is Part 2's job. We're going to:
+
+- Compile the linear-query protocol into a real point-query protocol via **recursion** — committing to the small oracles with a smaller TensorSwitch instance, and recursing $\log\log n$ times.
+- Identify the one thing the verifier actually has to compute locally to make compilation work: multilinear extensions of $C$'s generator matrix rows, called **right-extensions**.
+- Resolve a tension between code families: Reed–Solomon has efficient right-extensions but slow encoding; linear-time codes have fast encoding but no known efficient right-extensions. The fix is to use both — RS at inner recursion levels, a linear-time code at the outer level — and to **delegate** the outer code's right-extensions back to the prover.
+- Get the per-level query complexity from $O(\lambda)$ down to $o(\lambda / \log\log n)$ at deeper levels via **rate switching**, which keeps the *total* query count at $O(\lambda)$ instead of $O(\lambda \log\log n)$.
+- Cover the **round-by-round security** story, including the new notion of round-by-round *binding* the paper introduces for interactive commit phases.
+- Pull together all the constants and present the **two concrete instantiations** with their efficiency tables: TensorSwitch with rate-1/2 Reed–Solomon (~$2.41\lambda$ queries) and TensorSwitch with the Blaze-style RAA code (linear-time prover, ~$19\lambda$ queries).
+- Finish with a brief teaser of the **bonus IVC/PCD application** — the same recursion-to-smaller-codes machinery yields hash-based accumulation schemes with $O(\sqrt{\lambda n})$-sized accumulators.
+
+This part is more technical than Part 1 because it's where the nuts and bolts of compilation live.
+
+## The Recursion Blueprint
+
+Let me restate what we're trying to do. After running the Part 1 protocol on a polynomial of size $n = k^2$, the prover has sent:
+
+- A point oracle $F = C^2(M)$ of size $\ell^2$ (this is the main commitment, Merkle-rooted — already a real point oracle, no compilation needed).
+- A handful of **linear oracles**: $\mathsf{eval}$ (size $k$), $\mathsf{ood}$ (size $\ell$), and $t$ collected $\mathsf{col}_i$ vectors (total size $\sim t \cdot k = O(\lambda \sqrt n / \delta^2)$).
+
+The verifier's job in the linear query model was to issue a few linear queries to each of these oracles. We need to bridge this to a real protocol where the verifier only does point queries on Merkle commitments.
+
+### The idea in one sentence
+
+**Commit to the linear oracles themselves with another, smaller TensorSwitch instance.**
+
+That's it. Each linear query the outer verifier wanted to issue becomes an *evaluation claim* that the inner instance handles via its own opening protocol. Because the inner oracles are much smaller than $n$, the inner instance is much cheaper. And the inner instance's *own* linear oracles are even smaller — so we recurse again. After $\log\log n$ levels of this, the linear oracles have shrunk to constant size and can just be sent in the clear as plain (non-oracle) messages.
+
+Concretely:
+
+> **One iteration of TensorSwitch** (from the paper's Figure 1 caption): The prover sends a tensor encoding of the message. In Round 1, the prover computes $\mathsf{combo}$, a random combination of the message rows, and encodes it with a *new tensor code*. In Round 2, the verifier samples spot-check columns, and the prover encodes those columns with *another new tensor code*. The verifier samples row indices, the prover opens the original committed tensor at each, and this induces evaluation constraints on the new encodings of $\mathsf{cols}$ and $\mathsf{combo}$ — which are checked in the next iteration.
+
+The recursion terminates because each level's oracles are roughly the **square root** of the previous level's. We'll see why in the next section.
+
+### Why this is honest
+
+Recall the trade we made in Part 1: linear queries are fictional, but if the oracle is small enough we can commit to it with another PCS and have the prover prove the inner-product evaluation correctly. The recursion is exactly that "commit with another PCS" idea, taken to its logical conclusion — the inner PCS is itself TensorSwitch.
+
+There's one subtle requirement: each level's verifier must be able to *describe* the linear queries it wants the next level to certify. We'll come back to this in the right-extensions section — it's the only part of the verifier that doesn't trivially work out.
+
+## One Level of Recursion, Concretely
+
+Let's walk through what shrinks, by how much, with concrete numbers. Take $n = 2^{25}$ as our running example, with a rate-$1/2$ tensor code.
+
+### Level 0 (the outer instance)
+
+- Polynomial size: $n = 2^{25}$ (~33M coefficients).
+- $k = \sqrt n = 2^{12.5} \approx 5\,793$, $\ell = 2k \approx 11\,585$.
+- Main commitment $F$: an $\ell \times \ell$ matrix, ~134M entries, Merkle-committed. **Already point-query-friendly**, no compilation needed.
+- Linear oracles to be compiled: $\mathsf{eval}$ ($k \approx 5793$ entries) and $t$ collected $\mathsf{col}_i$'s. The naive total $t \cdot k \approx 1.16 \times 10^7$ entries collapses once we account for sharing — the asymptotic bound is $O(\lambda \sqrt n) \approx 7.4 \times 10^5$ entries (and with appropriate skewed-tensor packing, $O(\sqrt{\lambda n})$).
+
+### Level 1 (commit to those linear oracles)
+
+- Inner instance handles a vector of size roughly $\lambda \sqrt n$.
+- Treat that as a new "polynomial" of size $n_1 \approx \lambda \sqrt n$. New tensor code parameters: $k_1 = \sqrt{n_1} = \sqrt{\lambda \sqrt n} = \lambda^{1/2} \cdot n^{1/4}$.
+- For our running example: $k_1 \approx 11 \cdot 76 \approx 860$.
+- Inner $F_1$: ~$1700 \times 1700$ matrix, Merkle-committed.
+- Inner linear oracles to compile: $\mathsf{eval}_1$ and the $\mathsf{col}_i$'s for this level. Aggregate size $\sim O(\lambda \sqrt{n_1}) = O(\lambda^{3/2} n^{1/4})$ entries.
+
+### Level 2 and beyond
+
+- Each level square-roots the size of the data being handled (modulo $\lambda$ factors).
+- $n_2 \approx \lambda \sqrt{n_1} = \lambda^{3/2} n^{1/4}$, $n_3 \approx \lambda^{7/4} n^{1/8}$, and so on.
+- After $i$ levels, the data size is roughly $\lambda^{O(1)} \cdot n^{1/2^i}$.
+- Recursion terminates when the data fits in $O_\lambda(1)$, which happens after $\log\log n$ levels — for $n = 2^{25}$, that's about $\log 25 \approx 5$ levels.
+- At the bottom, the prover sends the (now constant-sized) data as a plain message; the verifier reads it directly and computes any inner products itself, no oracle access needed.
+
+The pyramid of recursion looks like this:
+
+> **Diagram placeholder** — `recursion-pyramid.svg`. A vertical pyramid with 5 layers shrinking left-to-right or top-to-bottom. Top layer: "Level 0: n = 2^25, oracles $\sim \lambda\sqrt n \sim 10^5$ entries". Each successive layer shows the data shrinking by a square root: "Level 1: $\sim \lambda^{3/2} n^{1/4}$", etc. Bottom layer: "Level $\log\log n$: $O_\lambda(1)$, sent in the clear".
+
+The key insight that makes the recursion bottom out cheaply: **each level's main commitment $F_i$ is much smaller than the previous level's $F_{i-1}$**, because $n_i \approx \lambda \sqrt{n_{i-1}}$. Total Merkle-tree work across all levels is dominated by Level 0, plus a small geometric tail.
+
+## Right-Extensions: What the Verifier Has to Compute Locally
+
+There's a wrinkle in the recursion blueprint. When the outer verifier wants to issue a linear query to (say) $\mathsf{combo}$ with weights $w$, the inner instance needs to *certify* that $\langle \mathsf{combo}, w\rangle$ has some claimed value. To do that, the verifier needs to be able to **describe** $w$ explicitly — specifically, it needs to evaluate $w$'s multilinear extension at points the inner protocol cares about.
+
+Walking through every linear query in the Part 1 protocol, the weight vectors $w$ all fall into one of these categories:
+
+1. **Equality coefficient vectors $\mathsf{eq}_x$.** The MLE of $\mathsf{eq}_x$ at a point $y$ is just $\mathsf{eq}(x, y) = \prod_i (x_i y_i + (1-x_i)(1-y_i))$ — costs $O(\log k)$ field operations. Easy.
+2. **Random combination vectors $r$.** Thanks to the $r := \mathsf{eq}_x$ merge from Part 1, these are also equality coefficient vectors. Easy.
+3. **Original weight vector $w$ from the evaluation claim.** When the claim is $\hat m(z) = v$, this is again $\mathsf{eq}_z$. Easy.
+4. **Rows of $C$'s generator matrix $G_C$.** Used when the verifier wants to compute $C(\mathsf{combo})[i]$ — that's a linear functional of $\mathsf{combo}$ whose weights are the $i$-th row of $G_C$. **This is the hard case.**
+
+Item 4 is what the paper calls a **right-extension**.
+
+### Definition
+
+Let $C: \mathbb F^k \to \mathbb F^\ell$ be a linear code with generator matrix $G_C \in \mathbb F^{\ell \times k}$. View $G_C$ as a function
+$$G_C: \\{0,1\\}^{\log \ell} \times \\{0,1\\}^{\log k} \to \mathbb F$$
+where $G_C(a, b)$ is the $(a, b)$-th entry of the matrix (with $a$ indexing rows and $b$ indexing columns, in bit representation). Let $\hat G_C: \mathbb F^{\log \ell} \times \mathbb F^{\log k} \to \mathbb F$ be its multilinear extension.
+
+**Right-extension** of $C$ at $(\alpha, \beta)$: compute $\hat G_C(\alpha, \beta)$.
+
+The paper's Proposition 7.1 gives a clean identity:
+$$\hat G_C(\alpha, \beta) = \widehat{C(\mathsf{eq}_\beta)}(\alpha)$$
+
+That is, evaluating the right-extension at $(\alpha, \beta)$ is the same as encoding the equality vector $\mathsf{eq}_\beta$ with $C$ and then taking the multilinear extension of the resulting codeword at $\alpha$.
+
+### Why this is the verifier's "remaining task"
+
+In the recursion, the inner instance certifies inner-product claims of the form $\langle \mathsf{combo}, w\rangle = c$, where $w$ is a generator-matrix row. The inner protocol (which is itself TensorSwitch) eventually wants to evaluate $\hat w$ at a point — and that's a right-extension evaluation of $C$.
+
+If we can compute $\hat G_C(\alpha, \beta)$ cheaply (in $O(\text{polylog}(\ell))$ time), the verifier's local work stays small and the whole recursion is succinct. If we can't, we need to **delegate** the right-extension computation to the prover — and that's where the next two sections come in.
+
+## Two Code Families, Two Trade-offs
+
+The paper's design space comes down to a choice of base code $C$. Two families matter:
+
+### Reed–Solomon: efficient right-extensions, slow encoding
+
+Reed–Solomon codes evaluate a polynomial at $\ell$ distinct points to produce a length-$\ell$ codeword from a length-$k$ message.
+
+- **Right-extension complexity:** $O(\log \ell)$ field operations (Lemma 7.5 of the paper). The generator matrix entries have a closed-form structure $G_C[x, b] = \phi(x)^{\sum_t b_t \cdot 2^{t-1}}$ where $\phi$ is the bit-to-evaluation-point map; this factors into a product of $\log k$ terms, each of which is cheap to evaluate.
+- **Encoding complexity:** $O(\ell \log \ell)$ via FFT — quasilinear, not linear.
+
+For the *outer* TensorSwitch instance, where $\ell$ is on the order of $\sqrt n$ and the prover is encoding millions of field elements, $O(\ell \log \ell)$ is uncomfortable: it kills the linear-time-prover dream.
+
+### Linear-time codes (e.g., RAA): linear encoding, no fast right-extension
+
+Linear-time encodable codes — like the RAA (Repeat-Accumulate-Accumulate) codes used in Blaze — encode in $O(\ell)$ field operations. That's what you want for an outer code on a big polynomial.
+
+But: **no known linear-time encodable code admits a polylogarithmic right-extension.** The best you can do for general linear codes is $O(\text{enc}_C(\ell)) = O(\ell)$ per right-extension query (Fact 7.3) — linear in the codeword length, which becomes prohibitive when the codeword length is $\sqrt n$.
+
+### TensorSwitch's resolution
+
+Use **both**. The recursion has many levels:
+
+- **Outer level (Level 0):** instantiate the tensor code with a linear-time code (RAA-style if you want max speed; RS if you can stomach $\log n$ overhead). This is where $n$ matters most.
+- **Inner levels (Level 1 and deeper):** instantiate with **Reed–Solomon**. The data being committed at these levels is at most $O(\lambda \sqrt n)$ field elements (Level 1) and shrinks rapidly. Quasilinear encoding on $\lambda \sqrt n$ data is fine — it doesn't dominate the prover's overall cost.
+
+If the outer code is RS, the verifier's right-extension work is $O(\log \ell)$ at every level, which the verifier handles directly. The total verifier time is $O(\lambda \log n)$.
+
+If the outer code is a linear-time code without efficient right-extensions, we need a different trick.
+
+## Delegating Right-Extensions to the Prover
+
+Suppose the outer code $C$ is RAA (linear-time encoding, no fast right-extension). The verifier wants to compute right-extensions of $C$ at points the inner protocol issues — but each such evaluation costs $O(\ell)$ time, far too much.
+
+**Solution:** the prover delegates the right-extension computation. When the verifier needs $\hat G_C(\alpha, \beta)$, the prover sends a claimed value and proves it correct using a **holographic PIOP for NP**, instantiated with the *RS* version of TensorSwitch (which has efficient verification).
+
+The cleanly bounded part: the size of the delegation computation is at most the right-extension complexity of $C$, which is at most $O(\text{enc}_C) = O(\ell) = O(\sqrt n)$ per query. With $O(\lambda)$ queries (after rate switching, see next section), the total delegated work is $O(\lambda \sqrt n)$ — which fits inside an inner RS-TensorSwitch instance whose own data is the same size. **The recursion absorbs the delegation.**
+
+The recipe (Section 7.2 of the paper):
+
+1. Take a holographic PIOP for NP with mild efficiency requirements — e.g., Spartan, Marlin, HyperPlonk.
+2. Compile it into a holographic IOP using TensorSwitch with RS codes (which has the succinct verifier we need).
+3. The right-extension delegation is the NP statement "the prover knows a witness such that the right-extension evaluations are these claimed values."
+
+Self-referential? Yes — TensorSwitch with linear-time codes uses TensorSwitch with RS codes as a subroutine. But it's well-founded because the RS-TensorSwitch instance only handles $O(\lambda \sqrt n)$-sized data, not $n$-sized data. The recursion bottoms out cleanly.
+
+## Rate Switching for $O(\lambda)$ Total Queries
+
+We have $\log\log n$ levels of recursion. At each level, the spot-check soundness analysis says we need $t \approx \lambda / \delta^2$ queries to drive cheating probability down to $2^{-\lambda}$. Naively:
+$$\text{Total queries} = (\log\log n) \cdot \lambda / \delta^2 = O(\lambda \log \log n).$$
+
+That's a $\log \log n$ blowup we'd like to kill. The fix is a clever observation due to [RR25, ACFY24, ACFY25]: the inner recursion levels are tiny, so we can afford to use **codes with much higher distance** (and correspondingly lower rate) without affecting the prover's overall cost.
+
+### The setup
+
+At Level $i$, the data being committed has size $n_i$, which shrinks like $n_i \approx \lambda^{O(1)} \cdot n^{1/2^i}$. Encoding cost per level is proportional to $n_i / \rho_i$ where $\rho_i$ is the rate — but $n_i$ is so small for $i \geq 1$ that we can drop $\rho_i$ all the way to $1/\log^{\omega(1)}(n)$ without the per-level encoding cost dominating.
+
+When $\rho_i = 1/\log^{\omega(1)}(n)$, the corresponding distance $\delta_i$ pushes up to $1 - 1/\log^{\omega(1)}(n)$ — close to the Singleton bound. The naive query formula $t_i \approx \lambda/\delta_i^2$ would only buy you a constant-factor savings at deeper levels, still $\Theta(\lambda)$ per level. The actual win comes from a sharper soundness analysis (oversampling plus correlated-agreement bounds): once $\delta_i \to 1$, the per-rep error decays much faster than $1 - \delta_i^2$, and a careful count gives $t_i = o(\lambda / \log\log n)$ at every level $i \geq 1$. Summed over the $\log\log n$ inner levels:
+$$\sum_{i=1}^{\log\log n} t_i = (\text{Level 0 cost}) + \sum_{i \geq 1} o(\lambda / \log\log n) = O(\lambda).$$
+
+Level 0 contributes the dominant $\sim \lambda / \delta^2$ queries (with $\delta$ from your chosen outer code, e.g., $1/2$ for RS or $0.19$ for Blaze's RAA). Levels 1+ contribute lower-order terms.
+
+> **Diagram placeholder** — `rate-switching.svg`. A horizontal table or bar chart with rows: Level 0, 1, 2, ..., log log n. Columns: $n_i$ (data size), $\rho_i$ (rate), $\delta_i$ (distance), $t_i$ (queries this level). The numbers visibly improve at deeper levels — rates drop, distances climb, query counts shrink.
+
+**The counterintuitive bit:** deeper levels of recursion use *worse* codes (lower rate, more redundancy, higher encoding cost per symbol) — but because the data at those levels is tiny, the absolute cost is fine, and the higher distance is a query-count win.
+
+## Round-by-Round Security
+
+Now the security side. Why do we care about more than just standard soundness?
+
+### Standard vs round-by-round soundness
+
+**Standard soundness** says: a cheating prover that produces a transcript the verifier accepts with probability $\geq \varepsilon$ doesn't exist (or exists only with negligible probability $\varepsilon$). This is the "end-to-end" guarantee.
+
+**Round-by-round (RBR) soundness** [CCHLRR18] is stronger. It says: there's a *state function* assigning each partial transcript a "good" or "bad" label, where:
+- The empty transcript is "good" iff the statement is true.
+- The full transcript is "good" iff the verifier accepts.
+- In each round, the probability of moving from "bad" to "good" — over the verifier's random challenge for that round — is at most some small $\varepsilon_i$.
+
+Why we care: RBR soundness implies **Fiat–Shamir security** in the random oracle model. If you're going to compile your interactive protocol into a non-interactive SNARG (which is what hash-based PCSs ultimately want), you need RBR soundness to apply Fiat–Shamir without a security loss.
+
+### Round-by-round binding (the new notion)
+
+There's a complication unique to TensorSwitch. The standard RBR soundness framework applies to *IOPs* (interactive oracle proofs) — a class that assumes a *non-interactive* commitment phase. But TensorSwitch's commitment phase is interactive — the verifier tosses random coins for the out-of-domain sampling ($\zeta$ and $\zeta'$). So standard RBR soundness doesn't directly apply.
+
+The paper introduces a new analogue: **round-by-round binding** (Section 4). The idea is the same as RBR soundness, but tailored to commitment phases. Informally, in each round of the commit phase, the prover faces a "bad event" — successfully committing in a way that lets it later equivocate — and the verifier's random challenge that round drives the bad-event probability below some $\varepsilon_i$.
+
+For TensorSwitch, the bad events in the commit phase look like:
+- **Round 1 (after $F$):** the prover sends $\mathsf{ood}$ that is *not* the multilinear evaluation of a unique decoding of $F$'s columns. The verifier's $\zeta$ challenge that round catches this with high probability via the OOD sampling lemma (Lemma 3.18).
+- **Round 2 (after $\mathsf{ood}$):** the prover sends $\mu$ that is not consistent with a unique row-decoding of the reconstructed $G$. Again, $\zeta'$ catches this.
+
+The opening phase is then analyzed as a standard IOP (since the commitment is now bound), and standard RBR soundness applies.
+
+### The over-sampling trick
+
+There's one more wrinkle worth knowing. The Part 1 spot check has *two rounds of interaction* per repetition: the verifier samples column $i$, the prover sends $\mathsf{col}_i$, then the verifier samples row $j$. When you parallel-repeat this $t$ times for soundness amplification, the standard RBR analysis gives a sub-optimal soundness bound.
+
+> Specifically [CCHLRR18, Prop 5.5] and [AFK23, Thm 5]: $k$-round protocols repeated $t$ times in parallel achieve RBR soundness error roughly $\varepsilon^{t/k}$, not $\varepsilon^t$. So for our 2-round spot check, we'd need to *double* $t$ to get the same RBR soundness as standard soundness.
+
+The paper avoids this $2\times$ blowup with an over-sampling trick. Instead of having the verifier sample exactly $t$ columns, sample $s = \tilde O(\lambda)$ columns first. By a Chernoff bound, this larger sample contains roughly a $(\delta_{\text{row}} - o(1))$-fraction of "bad" columns with overwhelming probability. *After* the prover commits to $\mathsf{col}_i$ for all $s$ sampled columns, the verifier subsamples $(1 + o(1)) \cdot t$ of them to actually run the spot checks on.
+
+The trick exploits the fact that the *first* round of interaction (column sampling) commits the prover to the $\mathsf{col}_i$ values before the *second* round (row sampling). By the time the verifier picks which subset to actually check, the prover can no longer adapt their answers. This effectively makes the spot check behave like a 1-round protocol for the purpose of RBR analysis, eliminating the $2\times$ penalty.
+
+### Knowledge soundness
+
+When the code $C$ has an efficient error-tolerant list decoder (which Reed–Solomon does, via Guruswami–Sudan), the paper further proves **round-by-round knowledge soundness** [BCFW25] — meaning a straightline extractor exists in the ROM. For codes without an efficient list decoder (like RAA), the paper conjectures rewinding-style knowledge soundness but doesn't prove it.
+
+## Batch Opening (Briefly)
+
+Section 5.4 of the paper addresses a practical wrinkle: the recursion produces *many* linear evaluation claims at each level, all of which need to be verified by the next level. Rather than running a separate opening protocol for each, you batch them with a random linear combination — standard PCS practice.
+
+Concretely: if the verifier has $q$ claims of the form $\langle v_j, w_j\rangle = c_j$ for $j \in [q]$ against the same commitment $\mathsf{cm}$, sample fresh randomness $\rho_1, \ldots, \rho_q$ and check the single combined claim
+$$\langle v, \textstyle\sum_j \rho_j w_j\rangle = \textstyle\sum_j \rho_j c_j.$$
+
+Why it matters here: each TensorSwitch level produces ~$O(t)$ claims that the next level handles in batch, keeping the per-level verifier costs from blowing up.
+
+## Theorem 8.5: The Full Statement
+
+Putting it all together, here's TensorSwitch's main efficiency theorem (paper's Theorem 8.5, lightly simplified):
+
+> **Theorem (TensorSwitch, informal).** Fix a security parameter $\lambda$ and linear codes $C_{\text{row}}: \mathbb F^{k_{\text{row}}} \to \mathbb F^{\ell_{\text{row}}}$, $C_{\text{col}}: \mathbb F^{k_{\text{col}}} \to \mathbb F^{\ell_{\text{col}}}$ with $n = k_{\text{row}} \cdot k_{\text{col}}$. Let $\rho := \sqrt{\rho_{\text{row}} \rho_{\text{col}}}$ and $\delta := \sqrt{\delta_{\text{row}} \delta_{\text{col}}}$ (geometric averages). Assume $C_{\text{row}}, C_{\text{col}}$ are linear-time encodable.
+>
+> There exists an interactive multilinear-polynomial commitment with:
+>
+> **Commit phase:**
+> - $3$ rounds, $2$ field elements of non-oracle communication.
+> - $3$ point oracles totaling $n/\rho^2 + (\lambda n)^{0.5+o(1)}$ field elements.
+> - Committer time: $\text{enc}_C + 3n + (\lambda n)^{0.5+o(1)}$ multiplications and $O(n)$ basic field operations.
+>
+> **Opening phase** (for $O(1)$ commitments and $O(1)$ evaluation claims):
+> - $O(\log n)$ rounds, $O(\lambda + \log n)$ field elements of non-oracle proof.
+> - $O(\log \log n)$ point oracles totaling $(\lambda n)^{0.5+o(1)}$ field elements.
+> - **Query complexity: $\tfrac{\lambda}{-\log(1 - \delta^2)} + o(\lambda)$ point queries** in total.
+> - Prover time: $O(n)$ multiplications + $(\lambda n)^{0.5+o(1)}$ extra.
+> - **Verifier time: $O(\lambda \log n)$ field operations.**
+
+Let me unpack the most-important rows:
+
+- **Query complexity is essentially $\lambda / \delta^2$** — this is the proof size in Merkle paths, the headline number.
+- **Number of oracle messages is $O(\log \log n)$** — vastly fewer than FRI/WHIR/Blaze's $\Omega(\log n)$. Each oracle message costs the prover a Merkle commitment and the verifier needs to verify queries against each one separately.
+- **Round complexity is $O(\log n)$** — comes from the sumchecks inside each recursion level, same asymptotic as FRI.
+- **Verifier time is $O(\lambda \log n)$** — independent of $n$ in everything but the log factor. This is "succinct verification."
+
+## The Numbers
+
+Now we can fill in the table from Part 1 with TensorSwitch's two concrete instantiations:
+
+| | Commit time | Opening time | Proof size | Ext-field encode |
+| --- | --- | --- | --- | --- |
+| Brakedown | $25.5n\ \mathbb F$ | $O(n)\ \mathbb F$ | $O(\sqrt{\lambda n})\ \mathbb F$ | $0$ |
+| Blaze | $8n\ \mathbb F^+$ | $O(n)\ \mathbb F$ | $O_\delta(\lambda\log^2 n)$ MP | $\tilde\Omega(n)$ |
+| FRI | $\tfrac{\log n}{\rho} n\ \mathbb F$ | $O(n)\ \mathbb F$ | $O_\delta(\lambda\log n)$ MP | $\tilde\Omega(n)$ |
+| WHIR | $\tfrac{\log n}{\rho} n\ \mathbb F$ | $\tilde O(n)\ \mathbb F$ | $O_\delta(\lambda\log\log n)$ MP | $\tilde\Omega(n)$ |
+| **TensorSwitch (RS)** | $\tfrac{\log n}{\rho^2} n\ \mathbb F$ | $6n\ \mathbb F$ | $\tfrac{\lambda}{-\log(1-\delta^2)}$ MP | $(\lambda n)^{0.51}$ |
+| **TensorSwitch (Blaze code)** | $42n\ \mathbb F^+ + 3n\ \mathbb F$ | $6n\ \mathbb F$ | $19\lambda$ MP | $(\lambda n)^{0.51}$ |
+
+The two TensorSwitch instantiations make different trade-offs:
+
+### TensorSwitch with Reed–Solomon (rate $1/2$)
+
+- **Commit time:** $(6 \log n + 3) n$ field multiplications. Quasilinear.
+- **Opening time:** $\sim 6n$ field multiplications.
+- **Query complexity:** $\sim 2.41\lambda$ Merkle paths (the explicit constant $1/(-\log(1 - 1/4))$ from the list-decoding analysis applied with $\delta_{\text{row}} \cdot \delta_{\text{col}} = 1/4$). For $\lambda = 128$: about **309 Merkle paths** total.
+- Best for: applications where you want minimum proof size and don't mind the quasilinear prover.
+
+### TensorSwitch with Blaze-style RAA codes (rate $1/4$, $\delta = 0.19$)
+
+- **Commit time:** $42n$ field *additions* + $3n$ field multiplications + $16n$ hash operations. **Truly linear time over the base field.** No FFT needed.
+- **Opening time:** $\sim 6n$ field multiplications + $(\lambda n)^{0.51}$ hashes.
+- **Query complexity:** $19\lambda$ Merkle paths. For $\lambda = 128$: about **2414 Merkle paths** (paper's Table 1 figure).
+- Best for: applications where prover speed dominates (proving large statements fast) and proof size is secondary.
+
+For comparison, Brakedown produces ~$10^6$ Merkle paths on a $2^{25}$-coefficient polynomial — three orders of magnitude more than even TensorSwitch (Blaze).
+
+**The engineering choice in one sentence:** RS gives the smallest proofs at the cost of an FFT-shaped prover; RAA gives the fastest prover (truly base-field linear) but needs $\sim 8\times$ more queries. Both are dramatic improvements over prior hash-based PCSs, and the right pick depends on whether you're optimizing proving throughput or proof bandwidth.
+
+## Bonus: A Hint at IVC/PCD with $\sqrt{\lambda n}$-Sized Proofs
+
+The same recursion-to-smaller-tensor-codes machinery has a side application worth a quick mention.
+
+**Incrementally Verifiable Computation** (IVC) and **Proof-Carrying Data** (PCD) are powerful primitives that let you verify long sequences of computation by recursively folding proofs into accumulators. The standard implementation route is via **accumulation schemes** [BCLMS21] — a primitive that lets you efficiently combine many proofs into a single short "accumulator" without re-proving everything.
+
+The TensorSwitch paper's Remark 1.4 observes: their core technique — reducing claims about a size-$n$ message encoded with one tensor code to claims about a size-$O(\sqrt{\lambda n})$ message encoded with a different code — is *exactly* what an accumulation scheme needs. Composed with one of the recent hash-based accumulation frameworks ([BCFW25]), you get a hash-based accumulation scheme with $O(\sqrt{\lambda n})$-sized accumulators.
+
+That translates to **IVC/PCD with $O(\sqrt{\lambda n})$-sized proofs** — improving on prior hash-based IVC constructions. The full development is its own substantial topic; this article keeps it as a teaser, with a deeper treatment to come in a future post.
+
+## What's Still Not Covered
+
+A few topics from the paper we've skipped or only sketched:
+
+- **Formal soundness proofs.** The full round-by-round error bounds (with their exact constants) live in Section 5.3 and the long lemma chains there.
+- **Composition lemmas (Appendix A).** The formal IOP-to-SNARG transformation and how interactive-commit IOPCSs compose with PIOPs to yield round-by-round secure IOPs.
+- **Field size requirements.** The OOD sampling argument and the proximity gap lemmas need a sufficiently large field; the paper specifies the exact bounds in Section 5.
+- **Knowledge soundness for linear-time codes.** Without an efficient list decoder, only rewinding-style extraction is conjectured.
+
+The [paper](https://eprint.iacr.org) is the place to go for any of these.
+
+## Conclusion
+
+TensorSwitch is the first hash-based polynomial commitment scheme to hit all three near-optimal targets at once:
+
+1. **Linear-time prover** (over the base field, with the Blaze-style instantiation).
+2. **Polylogarithmic proof size** (~$2.41\lambda$ Merkle paths for the RS variant; ~$19\lambda$ for the Blaze variant).
+3. **Sublinear extension-field work** ($(\lambda n)^{0.5+o(1)}$ instead of $\tilde\Omega(n)$).
+
+Prior work could achieve any two of these but always traded off the third. The technical machinery — tensor codes with code switching, two-round out-of-domain sampling, $\log\log n$-deep recursion with rate switching, right-extension delegation, and a new round-by-round binding notion for interactive commit phases — is intricate but cleanly composes.
+
+The practical implications are big. The Ethereum Foundation has called for hash-only proof systems (no group-based wrapping, no trusted setup), and TensorSwitch makes that practical for the first time without sacrificing prover performance. Post-quantum security is preserved (no group cryptography in the security argument, just collision-resistant hashes plus the random oracle model for Fiat–Shamir). And $O(\sqrt{\lambda n})$-sized IVC/PCD opens a route to recursive proof composition that doesn't pay a Groth16 wrapping tax.
+
+If you want to dig deeper:
+
+- The full [paper](https://eprint.iacr.org) for security proofs and exact constants.
+- Section 7 for the right-extension theory.
+- Section 8 for the main construction theorem.
+- Appendix A for the composition lemmas that turn an IOPCS + PIOP into a SNARG.
+
+## References
+
+- **TensorSwitch (this paper)**: Bünz, B., Fenzi, G., Rothblum, R. D., Wang, W. (2025). "TensorSwitch: Nearly Optimal Polynomial Commitments from Tensor Codes." Cryptology ePrint Archive.
+- **Spartan**: Setty, S. (2020). "Spartan: Efficient and general-purpose zkSNARKs without trusted setup." CRYPTO 2020. [https://eprint.iacr.org/2019/550.pdf](https://eprint.iacr.org/2019/550.pdf)
+- **Ligero / AHIV**: Ames, S., Hazay, C., Ishai, Y., Venkitasubramaniam, M. (2017). "Ligero: Lightweight sublinear arguments without a trusted setup." CCS 2017.
+- **Brakedown**: Golovnev, A., Lee, J., Setty, S., Thaler, J., Wahby, R. S. (2023). "Brakedown: Linear-time and field-agnostic SNARKs for R1CS." CRYPTO 2023.
+- **Blaze**: Brehm, M., Chen, B., Fisch, B., Resch, N., Rothblum, R. D., Zeilberger, H. (2025). "Blaze: Fast SNARKs from Interleaved RAA Codes." EUROCRYPT 2025.
+- **FRI**: Ben-Sasson, E., Bentov, I., Horesh, Y., Riabzev, M. (2018). "Fast Reed-Solomon Interactive Oracle Proofs of Proximity." ICALP 2018.
+- **WHIR**: Arnon, G., Chiesa, A., Fenzi, G., Yogev, E. (2024). "WHIR: Reed-Solomon Proximity Testing with Super-Fast Verification." EUROCRYPT 2025. [https://eprint.iacr.org/2024/1586.pdf](https://eprint.iacr.org/2024/1586.pdf)
+- **STIR**: Arnon, G., Chiesa, A., Fenzi, G., Yogev, E. (2024). "STIR: Reed-Solomon Proximity Testing with Fewer Queries." CRYPTO 2024.
+- **Code switching (RR25)**: Ron-Zewi, N., Rothblum, R. D. (2024). "Local Proofs Approaching the Witness Length." JACM.
+- **DEEP-FRI / Out-of-domain sampling**: Ben-Sasson, E., Goldberg, L., Kopparty, S., Saraf, S. (2019). "DEEP-FRI: Sampling Outside the Box Improves Soundness." [https://eprint.iacr.org/2019/336.pdf](https://eprint.iacr.org/2019/336.pdf)
+- **Round-by-round soundness (CCHLRR18)**: Canetti, R., Chen, Y., Holmgren, J., Lombardi, A., Rothblum, G. N., Rothblum, R. D. (2018). "Fiat-Shamir: From Practice to Theory." STOC 2019.
+- **BCFW25 (round-by-round knowledge soundness, accumulation)**: Bünz, B., Chiesa, A., Fenzi, G., Wang, W. (2025). "Linear-Time Accumulation Schemes." Cryptology ePrint Archive, Paper 2025/753.
+- **Accumulation schemes (BCLMS21)**: Bünz, B., Chiesa, A., Lin, W., Mishra, P., Spooner, N. (2021). "Proof-Carrying Data Without Succinct Arguments." CRYPTO 2021.
+- **AFK23 (parallel repetition for RBR soundness)**: Attema, T., Fehr, S., Klooß, M. (2023). "Fiat-Shamir Transformation of Multi-Round Interactive Proofs." TCC 2023.
+- **ACFY24, ACFY25**: see WHIR and STIR entries above.

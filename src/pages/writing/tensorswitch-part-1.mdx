@@ -17,7 +17,7 @@ So when you want a SNARK that's faster, smaller, or lighter on the verifier, you
 - **Smaller proofs.** Existing linear-prover PCSs produce megabyte-scale proofs. Brakedown, for instance, outputs a roughly 1.5 MB proof for a polynomial with $2^{25}$ coefficients. TensorSwitch gets the same proof down to a few thousand Merkle paths — close to the theoretical floor for any hash-based PCS whose commitment is just "encode the polynomial with a code and Merkle-hash the codeword."
 - **Less extension-field work.** To get good soundness on small "fast" base fields like Goldilocks or BabyBear, verifier randomness has to come from a bigger extension field (typically a degree-4 extension, so each element is $4\times$ the size and operations on it are noticeably more expensive). Every prior polylog-proof hash-based PCS — FRI, WHIR, Blaze — ends up doing linear-sized work in that expensive extension field. TensorSwitch cuts this to roughly $\sqrt{\lambda n}$.
 
-It also keeps a fast, linear-time base-field prover (about $6n$ base-field multiplications for opening) and produces only $O(\log \log n)$ Merkle tree commitments — compared to $\Omega(\log n)$ for FRI, WHIR, and Blaze.
+It also keeps a fast, linear-time base-field prover (opening is dominated by about $6n$ extension-field multiplications — the bound that matters, since extension-field ops are the expensive ones) and produces only $O(\log \log n)$ Merkle tree commitments — compared to $\Omega(\log n)$ for FRI, WHIR, and Blaze.
 
 ### A glossary before we touch the table
 
@@ -149,8 +149,8 @@ If the prover is honest, $F$ is a valid tensor codeword: every column is a codew
 
 A dishonest prover can send any $\ell \times \ell$ matrix they want. So we need to talk about "how bad" a dishonest $F$ can be. To make this concrete, define two auxiliary things:
 
-- $G$ — the matrix you'd get by taking each column of $F$ and unique-decoding it under $C$. The $i$-th column of $G$ is whichever message $g_i \in \mathbb F^k$ satisfies $C(g_i) \approx (i\text{-th column of } F)$, if such a message exists. Otherwise it's a special $\bot$ (undefined) symbol. In the honest case, $G$ equals $U$.
-- If $G$ is mostly well-defined, the matrix $M$ (if it exists) such that $G$ is the row-wise encoding of $M$.
+- $G$ — the matrix you'd get by taking each column of $F$ and unique-decoding it under $C$ (i.e., within distance $\delta/2$). The $i$-th column of $G$ is whichever message $g_i \in \mathbb F^k$ satisfies $C(g_i) \approx (i\text{-th column of } F)$, if such a message exists. Otherwise it's a special $\bot$ (undefined) symbol. In the honest case, $G$ equals $U$.
+- $M$ — whichever matrix, if one exists, such that $G$ is the row-wise encoding of $M$.
 
 Two cases:
 
@@ -193,7 +193,7 @@ Here's where the wall comes in. **To compute $r^T g_i$, the verifier has to read
 Each entry of $g_i$ corresponds (via unique decoding) to data from the committed $F$. In the Ligero realization, where the prover commits to $U$ directly, that's $\sqrt n$ Merkle path opens per spot check. With enough spot checks to catch cheats with probability $2^{-\lambda}$ (about $\lambda/\delta$ repetitions), total queries are:
 $$\Omega\!\left(\frac{\lambda \sqrt n}{\delta}\right) \text{ Merkle path opens.}$$
 
-For $n = 2^{25}$, $\lambda = 128$, $\delta = 1/2$: that's on the order of $10^6$ Merkle paths, each about a kilobyte. Multi-megabyte proofs.
+For $n = 2^{25}$, $\lambda = 128$, $\delta = 1/2$: that's on the order of $10^6$ Merkle paths in a naive realization. Brakedown's actual proof — which Merkle-commits column-wise rather than entry-wise, packing many path opens into shared authentication paths — comes out to about 1.5 MB.
 
 **The reason for the wall in one sentence:** arbitrary linear combinations over random weights make every position of the oracle relevant, so the verifier can't take shortcuts.
 
@@ -334,7 +334,7 @@ Here's the before/after in one glance:
 | **Soundness / rep**                               | $\sim \delta/2$                                   | $\sim (\delta/2)^2$                                        |
 | **Total reps**                                    | $\sim O(\lambda)$                                 | $\sim 4\lambda/\delta^2$                                   |
 | **Total MP opens**                                | $\sim \lambda\sqrt n$                             | $\sim 4\lambda/\delta^2$                                   |
-| **$n = 2^{25}$, $\lambda = 128$, $\delta = 1/2$** | $\sim 10^6$ opens (multi-MB proof)                | $\sim 2000$ opens (sub-MB proof)                           |
+| **$n = 2^{25}$, $\lambda = 128$, $\delta = 1/2$** | $\sim \lambda\sqrt n$ opens (multi-MB proof)      | $\sim 2000$ opens unique-decoding, $\sim 309$ list-decoding |
 
 The soundness bound per repetition is slightly worse ($\delta^2$ vs $\delta$), so we need a constant factor more repetitions. But each repetition does $O(1)$ work instead of $O(\sqrt n)$ — a massive win.
 
@@ -368,7 +368,7 @@ If the prover's $\mathsf{eval}$ is correct, then the multilinear extension of $\
 $$\hat{\mathsf{eval}}(y) = v.$$
 Why? Because $\hat m(z) = \hat m(x, y) = \hat q(y) = \hat{\mathsf{eval}}(y)$ when $\mathsf{eval} = q$.
 
-The verifier checks this with **one linear query** to $\mathsf{eval}$. The key observation is that for any vector $v \in \mathbb F^k$, $\hat v(y) = \langle v, \mathsf{eq}_y\rangle$ where $\mathsf{eq}_y$ is the "equality coefficient vector" for $y$ (a specific length-$k$ vector, cheap to compute, that implements the multilinear extension's evaluation at $y$ as an inner product). So the check is:
+The verifier checks this with **one linear query** to $\mathsf{eval}$. The key observation is that for any vector $u \in \mathbb F^k$, $\hat u(y) = \langle u, \mathsf{eq}_y\rangle$ where $\mathsf{eq}_y$ is the "equality coefficient vector" for $y$ (a specific length-$k$ vector, cheap to compute, that implements the multilinear extension's evaluation at $y$ as an inner product). So the check is:
 $$\langle \mathsf{eval}, \mathsf{eq}_y\rangle \stackrel{?}{=} v.$$
 
 If this passes, we believe $\mathsf{eval}$'s extension evaluated correctly at $y$ — but only _conditional_ on $\mathsf{eval}$ actually being the row $q$ that the prover is supposed to have sent. Which brings us to the second check.
@@ -402,13 +402,13 @@ Putting the two checks together:
 
 If all checks pass, accept. Done.
 
-The only subtlety: setting $r := \mathsf{eq}_x$ instead of fully random costs us a tiny bit in the proximity gap analysis. The paper handles this by assuming $C$ satisfies a slightly stronger proximity-gap property called **mutual correlated agreement** [ACFY25]. This is known to hold for Reed–Solomon near the Johnson bound, and conjectured to hold for many other codes.
+The only subtlety: setting $r := \mathsf{eq}_x$ instead of fully random costs us a tiny bit in the proximity gap analysis. The paper handles this by assuming $C$ satisfies a slightly stronger proximity-gap property called **mutual correlated agreement** [ACFY25] — informally, the property that proximity to a codeword is preserved under structured (not just uniformly random) linear combinations, which is what lets us swap a uniform $r$ for $\mathsf{eq}_x$ without losing soundness. This is known to hold for Reed–Solomon near the Johnson bound, and conjectured to hold for many other codes.
 
 ## Beyond the Unique Decoding Radius (Briefly)
 
 There's one more optimization worth mentioning, though we'll keep it light.
 
-Recall the repetition count: $t \approx 4\lambda/\delta^2$. This is because Check 2's soundness is driven by $\delta/2$ (the unique decoding radius), not $\delta$ itself. If we could somehow work with $\delta$ — pushing into the **list decoding** regime where there can be multiple candidate codewords within distance $\delta$ — we'd cut $t$ by a factor of 4. For rate-$1/2$ RS, that's the difference between $\sim 16\lambda$ and $\sim 4\lambda$ repetitions.
+Recall the repetition count: $t \approx 4\lambda/\delta^2$. This is because Check 2's soundness is driven by $\delta/2$ (the unique decoding radius), not $\delta$ itself. If we could somehow work with $\delta$ — pushing into the **list decoding** regime where there can be multiple candidate codewords within distance $\delta$ — we'd cut $t$ by a factor of 4: from $\sim 16\lambda$ down to $\sim 4\lambda$ for rate-$1/2$ RS. Additional optimizations in Part 2 (pushing $\delta$ closer to the Johnson bound, using the tighter $\lambda/(-\log(1-\delta^2))$ formula directly) shave this further to the headline $\sim 2.41\lambda$.
 
 The problem: beyond unique decoding, there's no single "the" decoded column $g_i$. The list of candidates can be exponential. Which one counts as the prover's commitment?
 
@@ -440,7 +440,7 @@ Let's recap what we've built, end-to-end.
 
 **Costs.**
 
-- Prover time: linear in $n$, dominated by encoding $F$ and producing the $\mathsf{col}_i$ oracles (about $6n$ base-field multiplications for opening).
+- Prover time: linear in $n$, dominated by encoding $F$ and producing the $\mathsf{col}_i$ oracles (opening is bounded by about $6n$ extension-field multiplications — the contribution that prior linear-prover schemes couldn't match).
 - Point queries to $F$: $t \approx O(\lambda/\delta^2)$. Each becomes a Merkle path in the real PCS.
 - Linear queries: a handful per repetition, to small oracles of total size $O(\lambda\sqrt n)$ (or $O(\sqrt{\lambda n})$ with a skewed tensor).
 
@@ -461,7 +461,7 @@ But the details are nontrivial. Part 2 will explain:
 - **The full efficiency numbers** for two concrete instantiations — one with Reed–Solomon (2.41$\lambda$ queries, rate $1/2$) and one with Blaze-style RAA codes (19$\lambda$ queries, rate $1/4$).
 - **A bonus:** how the same machinery gives $\sqrt{\lambda n}$-sized IVC/PCD proofs as a side effect.
 
-That's Part 2.
+Continue to [Part 2](/writing/tensorswitch-part-2).
 
 ## References
 
