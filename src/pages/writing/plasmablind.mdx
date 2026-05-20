@@ -1,0 +1,276 @@
+---
+layout: ../../components/blog-post.astro
+title: "How PlasmaBlind Makes Client-Side Proving Disappear"
+description: "A walkthrough of PlasmaBlind, a private UTXO Layer-2 where the client never runs a zkSNARK — they fold a witness with random noise in ~32ms and ship it."
+pubDate: "2026-05-20"
+tags: ["zero-knowledge", "folding-schemes", "layer-2", "privacy"]
+---
+
+## What problem are we solving?
+
+If you've followed private rollups, you've watched the same fight play out three different ways and seen all three lose.
+
+- **Nightfall.** Aggregator needs **144 CPU cores and 750 GB of RAM** to assemble a block of just **64 transactions**. Each user's transaction validity proof has to be composed into a single block proof, and the proof composition is what melts the machine.
+- **Aztec.** Tries the same recipe with sharper tooling. Testnet sits at **60 GB of aggregator RAM** and **0.2 TPS**. Same fundamental bottleneck.
+- **Intmax2.** Inverts the trade: push the proof composition onto the _client_ via PCD. Now the user has to prove their entire receive history, and every recipient has to merge the sender's proof with their own. Users have to keep syncing for every block, even ones they aren't in.
+
+The problem underneath all three: combining privacy (per-transaction zkSNARK) with scale (some kind of recursive composition) forces someone to do a lot of zero-knowledge work per transaction. The aggregator has to verify everyone's proofs and stitch them together. The client has to generate the proofs in the first place.
+
+**PlasmaBlind** (Daix-Moreux & Zhang, 2026) takes a different angle. The client no longer generates a zkSNARK. They run the transaction validity _circuit_, extract the R1CS witness, and then perform exactly _one_ folding step — mixing their real witness with a random one. The output _is_ the zero-knowledge proof.
+
+In numbers: **~32ms** to produce a transaction proof on a MacBook M1 Max, ~46ms to update a balance proof, **~36,000 TPS** in the centralized deployment, **~1,150 TPS** in the decentralized one (or ~1,800 TPS with 20-byte truncated nullifiers). No general-purpose zkSNARK on the client, ever.
+
+### A glossary before we touch the table
+
+The protocol carries notation from three different worlds — UTXO accounting, Merkle accumulators, and Nova folding. Six symbols recur from here on:
+
+- **$sk, pk$** — user secret/public key. Derived as $pk := \mathrm{PRF}(sk, \bot)$ using a circuit-friendly PRF (NOT an elliptic-curve scheme — PlasmaBlind keys don't have to interop with L1).
+- **$(j, k, t)$** — the position of a UTXO. It's the $j$-th output of the $k$-th transaction in block $t$. Every UTXO has a unique triple.
+- **$\overline{\mathrm{utxo}} := \mathrm{CM.C}(ck, \mathrm{utxo}; \rho)$** — a **committed UTXO**. A Pedersen-style hiding commitment to $(pk, \mathrm{val})$ with opening $\rho$. The opening goes to the recipient out-of-band; the commitment goes on-chain (well, into the aggregator's tree).
+- **$\mathsf{null} := \mathrm{PRF}(sk, (j, k, t))$** — the **nullifier** for that UTXO. Unique per UTXO, deterministic from $sk$, and hides the underlying position from anyone but the owner.
+- **$(\mathbb{w}, \mathbb{u})$** — an R1CS witness/instance pair. $\mathbb{w}$ is the assignment, $\mathbb{u} = (x)$ is the public input. The "would-have-been-SNARKed" object.
+- **$(\mathbb{W}, \mathbb{U})$** — a **committed-relaxed R1CS** pair (Nova's variant). $\mathbb{W} = (w, e, r_w, r_e)$ carries the witness plus an error term $e$ plus randomness; $\mathbb{U} = (\overline{w}, \overline{e}, u, x)$ carries hiding commitments to $w$ and $e$, a scalar $u$, and public inputs $x$. The pair is satisfying when $Az \circ Bz - u \cdot Cz = e$ for $z = (u, x, w)$. The original $(\mathbb{w}, \mathbb{u})$ is the special case $u = 1, e = 0$.
+
+Four Merkle trees show up:
+
+- **$T^{\mathrm{utxo}}_t$** — committed UTXOs in block $t$. Ephemeral, per-block.
+- **$T^{\mathrm{pk}}_t$** — sender public keys for valid transactions in block $t$ (or $\bot$ for unsettled ones). Ephemeral, per-block.
+- **$T^{\mathrm{null}}$** — all historical nullifiers. Global, permanent. Stored as an **interval Merkle tree** so the aggregator can prove non-membership in a circuit.
+- **$T^{\mathrm{blk}}$** — block headers (one per block). Global, permanent.
+
+A block header is the triple $(r^{\mathrm{utxo}}_t, r^{\mathrm{pk}}_t, r^{\mathrm{null}}_{[t]})$ — three Merkle roots. The block tree's leaves are headers.
+
+<img
+  src="/diagrams/plasmablind-tree-of-trees.svg"
+  alt="TODO: replace — tree-of-trees diagram. Global block tree T^blk on top; each leaf is a block header (r^utxo_t, r^pk_t, r^null_[t]). Two per-block ephemeral trees T^utxo_t and T^pk_t hang off each header on the left; the global permanent interval-Merkle nullifier tree T^null hangs off on the right shared across all blocks."
+/>
+
+### How it stacks up
+
+|                     | Aggregator RAM needed | Client proving | Client sync | Client proof object | TPS (centralized) |
+| ------------------- | --------------------- | -------------- | ----------- | ------------------- | ----------------- |
+| Nightfall (64 tx)   | 750 GB                | full zkSNARK   | none        | succinct SNARK      | low               |
+| Aztec (testnet)     | 60 GB                 | full zkSNARK   | none        | succinct SNARK      | 0.2 TPS           |
+| Intmax2             | low                   | full PCD       | every block | recursive proof     | high (theory)     |
+| **PlasmaBlind**     | **commodity (benched on 64 GB i9)** | **~32 ms** | **only relevant blocks** | **folded R1CS pair** | **~36,000 TPS** |
+
+The trade is clear once you read across the row. PlasmaBlind's client proof is _not_ succinct — it's a folded R1CS witness, hundreds of kilobytes — but the client paid milliseconds to make it, and the aggregator can fold them all together cheaply. The succinctness comes back at the end, when the aggregator compresses everything into a final decider SNARK.
+
+**Prerequisites.** You should know what a zkSNARK is at the blackbox level, be familiar with Zcash-style shielded UTXOs (nullifiers, commitments, Merkle accumulators), and have at least heard the words "Nova" and "IVC." We'll re-introduce just enough of Nova to make the folding trick land. **What we won't cover:** formal soundness proofs, the internals of MicroNova (used as the decider), CycleFold mechanics, or the epoch-based block-tree optimization beyond a one-line mention.
+
+## A Refresher: Nova Folding in One Page
+
+To understand the trick, you need committed-relaxed R1CS and one folding step. Both come from Nova (Kothapalli–Setty–Tzialla, CRYPTO 2022).
+
+**R1CS** is the constraint system $Az \circ Bz = Cz$ for matrices $A, B, C \in \mathbb F^{m \times n}$ and an assignment $z \in \mathbb F^n$. A witness $\mathbb{w}$ paired with public input $\mathbb{u}$ satisfies the system if the equation holds.
+
+**Committed-relaxed R1CS** generalizes this in two ways. First, an _error term_ $e$ lets us relax the equation: $Az \circ Bz - u \cdot Cz = e$, where $u$ is a scalar. Set $u = 1, e = 0$ and you recover standard R1CS. Second, the witness $w$ and error $e$ are wrapped in **hiding commitments** $\overline{w}, \overline{e}$ — Pedersen-style commitments with randomness $r_w, r_e$.
+
+The pair becomes:
+
+$$
+\mathbb{W} = (w, e, r_w, r_e), \qquad \mathbb{U} = (\overline{w}, \overline{e}, u, x)
+$$
+
+— $\mathbb{W}$ is the secret, $\mathbb{U}$ is the public, and "satisfying" means $\overline{w}, \overline{e}$ are correct commitments _and_ $Az \circ Bz - u \cdot Cz = e$ for $z = (u, x, w)$.
+
+**Folding** takes two satisfying committed-relaxed pairs $(\mathbb{W}_1, \mathbb{U}_1)$ and $(\mathbb{W}_2, \mathbb{U}_2)$ for the same $A, B, C$ and produces _one_ satisfying pair $(\mathbb{W}, \mathbb{U})$. The mechanics:
+
+1. Prover computes $z_i = (u_i, x_i, w_i)$ and sends a commitment $\overline{t}$ to the cross-term
+
+$$
+t = Az_1 \circ Bz_2 + Az_2 \circ Bz_1 - u_1 \cdot Cz_2 - u_2 \cdot Cz_1
+$$
+
+2. Verifier sends a random challenge $\rho \in \mathbb F$.
+3. Both parties compute the folded instance: $\overline{w} = \overline{w}_1 + \rho \overline{w}_2$, $\overline{e} = \overline{e}_1 + \rho \overline{t} + \rho^2 \overline{e}_2$, $u = u_1 + \rho u_2$, $x = x_1 + \rho x_2$.
+4. The prover (privately) computes the folded witness: $w = w_1 + \rho w_2$, $r_w = r_{w_1} + \rho r_{w_2}$, and similarly for $e$ with $r_e$.
+
+The output $(\mathbb{W}, \mathbb{U})$ satisfies committed-relaxed R1CS iff both inputs did. **No SNARK was generated.** What changed hands: one cross-term commitment $\overline{t}$, one challenge $\rho$, and one linear combination. That's why folding is fast — it's a multiscalar multiplication and a couple of vector ops, not a polynomial commitment opening.
+
+We'll write the prover side of this single fold as $\mathrm{NIFS.P}(ak, \cdot, \cdot)$ and the verifier side as $\mathrm{NIFS.V}(vk, \cdot, \cdot, \cdot)$. Here $ak, vk$ are the folding scheme's accumulator/verifier keys — fixed setup data. NIFS stands for "non-interactive folding scheme"; the interactive challenge $\rho$ becomes a Fiat–Shamir hash in the non-interactive form.
+
+(Sharp readers comparing the cross-term against the paper will notice a transcription typo there: the paper writes $-u_1 Cz_1 - u_2 Cz_2$ in the $\rho^1$ coefficient, but the correct cross-term comes from substituting $z = z_1 + \rho z_2$ into $Az \circ Bz - u Cz$ and reads $-u_1 Cz_2 - u_2 Cz_1$, as above.)
+
+**The blinding observation.** Nova-style folding has a property the paper calls **blinding**: if you fold a satisfying pair $(\mathbb{w}, \mathbb{u})$ with a _uniformly random_ satisfying pair $(\mathbb{W}^{*}, \mathbb{U}^{*})$, the folded witness $\mathbb{W}$ is information-theoretically independent of the input $\mathbb{w}$. The randomness in $\mathbb{W}^{*}$ masks the input. The paper attributes this observation to HyperNova [24], and it's the seed of every speed result that follows.
+
+## The Trick: Folding-With-Random Is Already Zero-Knowledge
+
+Here's the move that makes PlasmaBlind work. The user has built a satisfying R1CS pair $(\mathbb{w}^{\mathrm{tx}}, \mathbb{u}^{\mathrm{tx}})$ — the assignment they'd normally hand to a zkSNARK prover. Instead of running the prover, they:
+
+1. Sample a uniformly random satisfying committed-relaxed pair $(\mathbb{W}^{*}, \mathbb{U}^{*})$.
+2. Run **one** folding step against it: $(\mathbb{W}^{\mathrm{tx}}, \mathbb{U}^{\mathrm{tx}}), \pi := \mathrm{NIFS.P}(ak, (\mathbb{W}^{*}, \mathbb{U}^{*}), (\mathbb{w}^{\mathrm{tx}}, \mathbb{u}^{\mathrm{tx}}))$.
+3. Ship $\pi^{\mathrm{tx}} := (\mathbb{W}^{\mathrm{tx}}, \mathbb{U}^{*}, \mathbb{u}^{\mathrm{tx}}, \pi)$.
+
+That's the entire "proof generation" the user does. The thing they ship _is_ a folded witness plus enough public data to let the aggregator re-derive the folded instance.
+
+<img
+  src="/diagrams/plasmablind-blindfold.svg"
+  alt="TODO: replace — flow diagram of the BlindFold trick. Circuit eval on (sk, tx) yields the R1CS pair (w^tx, u^tx); a random satisfying pair (W$, U$) is sampled; one NIFS.P fold mixes them into (W^tx, U^tx, π); the shipped object is the boxed tuple (W^tx, U$, u^tx, π)."
+/>
+
+**Why it's zero-knowledge.** The blinding property says $\mathbb{W}^{\mathrm{tx}}$ is distributed identically regardless of what $\mathbb{w}^{\mathrm{tx}}$ was — the random pair masks the real witness. The aggregator can verify $\mathbb{W}^{\mathrm{tx}}$ satisfies committed-relaxed R1CS, but they can't recover anything about the original transaction from it.
+
+**Why it's sound.** The folding scheme is sound: if $\mathbb{w}^{\mathrm{tx}}$ didn't satisfy the transaction validity circuit, then with overwhelming probability over $\rho$, the folded pair $(\mathbb{W}^{\mathrm{tx}}, \mathbb{U}^{\mathrm{tx}})$ doesn't satisfy committed-relaxed R1CS — and the aggregator catches it.
+
+**The catch:** the "proof" isn't succinct. $\mathbb{W}^{\mathrm{tx}}$ carries a folded witness vector. For a transaction validity circuit of size $\sim 10^5$ constraints, that's hundreds of kilobytes. We trade a small succinct proof (slow to generate) for a big non-succinct one (fast to generate, but big on the wire). PlasmaBlind makes this trade work by pushing the succinctness step to the _aggregator_, who has CPU to spare and can amortize it over an entire block.
+
+## What's In a Transaction
+
+Before we follow the proof to the aggregator, let's pin down what the transaction validity circuit actually checks. PlasmaBlind runs in the UTXO model. A transparent transaction is
+
+$$
+\mathrm{tx} := (\{\mathrm{utxo}^I_i\}_{i=0}^{m-1}, \{\mathrm{utxo}^O_j\}_{j=0}^{n-1})
+$$
+
+— $m$ input UTXOs, $n$ output UTXOs. The sender knows it; nobody else does. The shielded form replaces each input with a nullifier and each output with a committed UTXO:
+
+$$
+\overline{\mathrm{tx}} := (\{\mathsf{null}^I_i\}_{i=0}^{m-1}, \{\overline{\mathrm{utxo}}^O_j\}_{j=0}^{n-1})
+$$
+
+The transaction validity circuit $F^{\mathrm{tx}}$ enforces, in plain English:
+
+- $pk$ is derived from $sk$: $pk = \mathrm{PRF}(sk, \bot)$.
+- For every input UTXO at position $(j', k', t')$: the sender owns it, it's the $j'$-th leaf of the committed UTXO tree of transaction $k'$ in block $t'$, that block's header sits in the block tree at root $r^{\mathrm{blk}}$, and the supplied nullifier is correctly derived: $\mathsf{null}^I_i = \mathrm{PRF}(sk, (j', k', t'))$.
+- For every output UTXO: the committed form is a correct opening of the plaintext.
+- The values balance: $\sum_i \mathrm{utxo}^I_i.\mathrm{val} = \sum_j \mathrm{utxo}^O_j.\mathrm{val}$.
+
+A handful of Merkle membership proofs (`MT.V`) and PRF evaluations. The sender hands witness $w = (sk, \mathrm{tx})$ and public input $x = (\overline{pk}, \overline{\mathrm{tx}}, r^{\mathrm{blk}})$ to the circuit, extracts the assignment, and that's the $(\mathbb{w}^{\mathrm{tx}}, \mathbb{u}^{\mathrm{tx}})$ pair they fold.
+
+<img
+  src="/diagrams/plasmablind-utxo-flow.svg"
+  alt="TODO: replace — UTXO/nullifier flow. Left: transparent tx with m input utxo^I_i and n output utxo^O_j (sender-visible). Middle: shielding step — each input becomes a nullifier null^I_i = PRF(sk, (j,k,t)); each output becomes a committed utxo overline{utxo}^O_j = CM.C(ck, utxo; ρ). Right: on-chain artifacts — nullifiers inserted into the interval Merkle tree T^null, committed outputs inserted into T^utxo_t, sender pk inserted into T^pk_t."
+/>
+
+## Why the Aggregator's Side Is Hard
+
+The user's job ends there. The aggregator's job is harder. Per transaction, the aggregator has to:
+
+1. **Verify the user's folded pair.** That is, fold $\mathbb{U}^{*}$ with the claimed $\mathbb{u}^{\mathrm{tx}}$ on the verifier side and check it matches $\mathbb{U}^{\mathrm{tx}}$. Cheap — one `NIFS.V`.
+2. **Update three trees.** Insert $\overline{\mathrm{utxo}}$s into the committed UTXO tree, insert sender public keys (or $\bot$) into the public key tree, insert nullifiers into the interval Merkle nullifier tree (which requires finding the right interval and splitting it).
+3. **Produce a block proof.** The rollup contract needs a single succinct proof that everything above happened correctly for every transaction in the block.
+
+The naive way to produce that block proof is **non-uniform PCD**: think of a circuit that branches between "fold this transaction" and "update this tree," then recursively compose proofs in a tree structure. Two things make non-uniform PCD expensive:
+
+- **Non-uniform** means different parts of the computation use _different_ step circuits. You either build a giant circuit that contains all of them with branching gadgets, or you use a PCD scheme that natively supports heterogeneous steps — both more expensive than the uniform case.
+- **PCD** itself (vs IVC) handles tree-shaped composition where leaves are external proofs from many provers. The recursion overhead of verifying a folded pair _inside_ a SNARK circuit is the cost center.
+
+This is the rock the 750-GB-RAM aggregators broke on.
+
+## The Aggregator's Trick: Two Linked Uniform IVC Chains
+
+PlasmaBlind's structural fix is to refuse the PCD framing. The aggregator instead maintains **two independent uniform IVC chains** running in parallel, and links them with a single line of step-circuit logic.
+
+**Chain 1 — the user-chain.** A running accumulator $(\widetilde{\mathbb W}, \widetilde{\mathbb U})$ that swallows incoming user folded pairs, one transaction at a time. Every step is the same operation: take the current accumulator, take the user's $(\mathbb W^{\mathrm{tx}}, \mathbb U^{\mathrm{tx}})$, fold them into a new accumulator. Uniform — every transaction looks like every other transaction.
+
+**Chain 2 — the state-chain.** A running pair $(\mathbb W^{\mathrm{blk}}, \mathbb U^{\mathrm{blk}})$ accumulating proofs that the per-step state update circuit $F^{\mathrm{blk}}$ ran correctly. The step circuit takes the current state $(k, r^{\mathrm{utxo}}_t, r^{\mathrm{pk}}_t, r^{\mathrm{null}}_{[t],[s]}, \ldots)$ and a witness $(k', \mathbb U^{*}, \mathbb u^{\mathrm{tx}})$, and enforces:
+
+- The committed UTXO membership check (the $k$-th leaf of $T^{\mathrm{utxo}}_t$ is the right output set).
+- The public key membership check (the $k$-th leaf of $T^{\mathrm{pk}}_t$ is the sender's $pk$).
+- The nullifier-tree interval update (find $(\mathrm{lb}, \mathrm{ub})$ such that $\mathrm{lb} < \mathsf{null}^I < \mathrm{ub}$, replace it with two new intervals).
+
+The step circuit is the same every time. Uniform.
+
+**The link.** Inside $F^{\mathrm{blk}}$ there's one extra line:
+
+$$
+\widetilde{\mathbb U}'_t := \mathrm{NIFS.V}(vk, \widetilde{\mathbb U}_t, \mathbb U^{*}_{t,k}, \mathbb u^{\mathrm{tx}}_{t,k}, \pi^{\mathrm{NIFS}}_{t,k})
+$$
+
+The state-chain's step circuit verifies, _inside the circuit_, that the user-chain's current accumulator was advanced by folding the same transaction this step is processing. That single `NIFS.V` call ties the two chains together: it's impossible to update the trees for transaction $X$ in chain 2 unless chain 1 actually folded transaction $X$ in.
+
+The full per-transaction trace from the paper (§3.2.2):
+
+1. $\mathbb U^{\mathrm{tx}}_{t,k} := \mathrm{NIFS.V}(vk, \mathbb U^{*}_{t,k}, \mathbb u^{\mathrm{tx}}_{t,k}, \pi_{t,k})$ — extract the verifier-side folded instance from the user's shipment.
+2. **Chain 1 update:** $(\widetilde{\mathbb W}_{t,k+1}, \widetilde{\mathbb U}_{t,k+1}) := \mathrm{NIFS.P}(ak, (\widetilde{\mathbb W}_{t,k}, \widetilde{\mathbb U}_{t,k}), (\mathbb W^{\mathrm{tx}}_{t,k}, \mathbb U^{\mathrm{tx}}_{t,k}))$.
+3. **Chain 2 update:** $(\mathbb W^{\mathrm{blk}}_{t,k+1}, \mathbb U^{\mathrm{blk}}_{t,k+1}) := \mathrm{NIFS.P}(ak, (\mathbb W^{\mathrm{blk}}_{t,k}, \mathbb U^{\mathrm{blk}}_{t,k}), (\mathbb w^{\mathrm{blk}}_{t,k}, \mathbb u^{\mathrm{blk}}_{t,k}))$.
+4. **Evaluate $F^{\mathrm{blk}}$** on $(\widetilde{\mathbb U}_{t,k}, \ldots)$ to get the next $(\mathbb w^{\mathrm{blk}}_{t,k+1}, \mathbb u^{\mathrm{blk}}_{t,k+1})$.
+
+Steps 2 and 3 are both uniform folds. Step 4 is a uniform circuit eval. Step 1 is the aggregator running NIFS.V outside the circuit — also cheap.
+
+<img
+  src="/diagrams/plasmablind-two-chains.svg"
+  alt="TODO: replace — two parallel IVC chains. Top row: user-chain accumulator (W̃, Ũ) advancing left-to-right by folding each incoming user pair (W^tx_{t,k}, U^tx_{t,k}). Bottom row: state-chain (W^blk, U^blk) advancing in lockstep by folding step-circuit pairs (w^blk, u^blk). A labelled arrow 'NIFS.V inside F^blk' links each state-chain step down to the corresponding user-chain fold, showing the single line of step-circuit logic that ties the two chains together."
+/>
+
+**Why this beats non-uniform PCD.** Two reasons.
+
+- **Uniform amortization.** Cycle-of-curves overhead (CycleFold) is paid once per chain, not once per step circuit variant. With two uniform chains you have constant overhead. With non-uniform PCD you'd have overhead proportional to the number of step-circuit shapes.
+- **No branching in the step circuit.** A non-uniform circuit needs gadgets that select between branches — every branch's constraints are present, gated by selectors. PlasmaBlind's step circuit is just the state update; the user-proof verification is _separately_ accumulated in chain 1 and only _checked_ inside the state circuit via one `NIFS.V` call.
+
+The result: per-transaction aggregator time **~300 ms** end-to-end, even with both chains running.
+
+At the end of the block, the aggregator compresses both running pairs and a final block-tree-update proof into one zkSNARK using MicroNova [32], yielding $\pi^{\mathrm{blk}}_t \approx 12$ KB. _This_ is the proof that goes on-chain.
+
+## Balance Proofs and Instant Exit
+
+The user maintains a third proof locally: $\pi^{\mathrm{bal}}$, an IVC proof over a balance update step circuit $F^{\mathrm{bal}}$. The witness records the user's running balance and nonce; the step circuit checks each transaction the user is involved in (send or receive), updates the balance, increments the nonce on sends.
+
+The improvement over Intmax2 is two-fold:
+
+- **No sync for irrelevant blocks.** For blocks the user isn't in, they just accumulate the block's roots into a chained hash $h' := H(h, (r^{\mathrm{utxo}}_{t'}, r^{\mathrm{pk}}_{t'}))$ — no cryptographic step circuit invocation. They prove membership of those hashed blocks in the block tree only when they need to exit.
+- **Folding-based IVC, not PCD.** Update overhead per relevant block is folding-cheap (~46 ms on M1 Max), not PCD-expensive.
+
+Exiting is non-interactive: present $\pi^{\mathrm{bal}}$ + block-tree membership proofs for accumulated $h$ to the rollup contract. The contract verifies, transfers the L1 balance, removes the user's L2 entry.
+
+## The Numbers
+
+§4 of the paper benchmarks the Rust implementation (built on the [sonobe](https://github.com/privacy-ethereum/sonobe) folding library). Client benchmarks on a MacBook M1 Max / 32 GB; aggregator benchmarks on an Intel i9-12900K / 64 GB.
+
+**Client-side proving** (Table 1, paper):
+
+|                       | Griffin (2-to-2) | Poseidon (2-to-2) | Griffin (4-to-4) | Poseidon (4-to-4) |
+| --------------------- | ---------------- | ----------------- | ---------------- | ----------------- |
+| Prove transaction validity | 32.8 ms     | 51.8 ms           | 60.4 ms          | 94.0 ms           |
+| Prove balance update      | 43.1 ms      | 45.8 ms           | 46.4 ms          | 48.3 ms           |
+
+Griffin is roughly 1/3 faster than Poseidon for transaction validity (smaller circuit), but their balance update times are within 5 ms — the bottleneck there is CycleFold's recursive overhead, which is hash-function-agnostic. _Note: the paper benchmarks Griffin while flagging that recent algebraic attacks have raised questions about Griffin's security; the numbers are representative of efficiency-comparable safer alternatives._
+
+**Aggregator-side block building** scales linearly with the number of transactions. At 128 transactions per block, the total time ranges from **34.0 s (Griffin, 2-to-2)** to **45.5 s (Poseidon, 4-to-4)**. Breakdown of the 128-tx Griffin case: local instance folding (51–60%), user instance folding (19–21%), step circuit synthesis (11–22%), user instance validation (7–10%). The state-chain (chain 2) fold dominates, which makes sense — its witness carries the augmented step circuit's full assignment.
+
+**Throughput.** The math (paper §4 closing paragraphs) assumes 14 blobs per L1 block × 131,072 B = 1835 KB of available blob space, 12-second L1 slots, a 12 KB decider proof, a 96-byte header, 4-input transactions, and Intmax2's ~4.15-byte short-id encoding for sender public keys.
+
+- **Centralized.** Aggregator doesn't post nullifiers — only sender ids. $(1835 - 12 - 0.096)\ \mathrm{KB} / 0.00415\ \mathrm{KB/tx} \approx 439{,}254$ transactions per L1 block → **~36,604 TPS**.
+- **Decentralized.** Aggregator must post 4 × 32 bytes of nullifiers per transaction (so different aggregators stay in sync). $132.15\ \mathrm{B/tx}$ → ~13,796 tx/block → **~1,149 TPS**. Truncate nullifiers to 20 bytes and you get **~1,805 TPS**.
+
+The 30× drop from centralized to decentralized is fundamentally a calldata problem, not a proving problem — the prover-side numbers are the same.
+
+**Proof sizes** grow linearly with block-tree height (the epoch optimization). At height 4 (a small anonymity set), Griffin 2-to-2 is 259 KB. At height 32 (a maximum-sized epoch), Poseidon 4-to-4 hits 1.9 MB. Big for mobile clients, fine for laptop/desktop senders.
+
+## Limitations
+
+The honest list, mostly from §3.3 and the structure of the construction.
+
+- **Sender public keys are visible on-chain.** PlasmaBlind hides _amounts_ and _recipients_ but reveals when each address is transacting. This is a deliberate trade for data availability: without sender ids in the public key tree, the user can't verify their endorsed transaction was actually included in a block. Stronger sender privacy is possible but needs different DA assumptions.
+- **Client proofs are big.** Hundreds of KB to ~2 MB per transaction. Acceptable for aggregator ingestion (and far smaller than the alternative — sending a full IVC proof history Intmax2-style), but heavy for mobile.
+- **Decentralized throughput is calldata-bound.** ~30× drop from centralized to decentralized comes entirely from posting nullifiers on-chain for cross-aggregator consistency. Not solved by PlasmaBlind.
+- **Decider choice matters.** Centralized throughput math bakes in MicroNova's 12 KB proof size for the decider. A different decider SNARK changes the headline TPS number.
+- **Griffin caveat.** The benchmarks lean on Griffin for raw speed, but recent algebraic attacks have raised concerns. The paper flags this; production deployments would need a safer arithmetization-oriented hash.
+
+## What's Worth Taking Away
+
+Three ideas, in order of how much they generalize.
+
+**1. Folding-with-random is a ZK proof.** This is the smallest, most reusable trick in the paper. Any time you have a folding scheme with the blinding property and a relation that can be expressed as committed-relaxed R1CS, you can produce a zero-knowledge proof of satisfiability by doing _exactly one_ folding step against a random satisfying pair. No general-purpose zkSNARK prover ever runs.
+
+**2. Two linked uniform IVC chains beat one non-uniform PCD.** When you have a computation that mixes external (other parties' proofs) and local (your tree updates) work with different shapes, the textbook fix is non-uniform PCD. PlasmaBlind shows you can often factor it: run two uniform IVC chains in parallel and add one `NIFS.V` line to the local chain's step circuit to verify the external chain folded the same input. The paper notes this is of "independent interest" — it's the kind of pattern that should show up in other rollup designs.
+
+**3. The PCS-style cost flip works for L2s too.** PCSs have spent years moving costs from the verifier to the prover via succinct proofs. Folding does the opposite move for L2s: it puts a (small, fast) cost on the client and a (big, but cheap-per-tx) cost on the aggregator. The end-to-end win comes from the aggregator being able to amortize over the whole block.
+
+If you want to chase the threads: read [PlasmaFold](https://eprint.iacr.org/2025/1300) (the non-private precursor by the same authors), [Nova](https://eprint.iacr.org/2021/370) for the folding scheme internals, [HyperNova](https://eprint.iacr.org/2023/573) for the blinding-folding observation, [MicroNova](https://eprint.iacr.org/2024/928) for the decider, and the [sonobe](https://github.com/privacy-ethereum/sonobe) Rust implementation if you want to play with folding directly.
+
+## References
+
+- **PlasmaBlind** (this paper): [eprint 2026/634](https://eprint.iacr.org/2026/634) — Daix-Moreux & Zhang, 2026.
+- **PlasmaFold**: [eprint 2025/1300](https://eprint.iacr.org/2025/1300) — Daix-Moreux & Zhang, 2025. Non-private precursor.
+- **Intmax2**: [eprint 2023/1082](https://eprint.iacr.org/2023/1082) — Rybakken et al., 2023. The short-id and DA design PlasmaBlind borrows.
+- **Nightfall**: [github.com/EYBlockchain/nightfall_4_CE](https://github.com/EYBlockchain/nightfall_4_CE), 2024.
+- **Nova**: Kothapalli, Setty, Tzialla. _Recursive zero-knowledge arguments from folding schemes._ CRYPTO 2022.
+- **HyperNova**: Kothapalli, Setty. _Recursive arguments for customizable constraint systems._ CRYPTO 2024.
+- **CycleFold**: Kothapalli, Setty. [eprint 2023/1192](https://eprint.iacr.org/2023/1192).
+- **MicroNova**: Zhao, Setty, Cui, Zaverucha. _Folding-based arguments with efficient (on-chain) verification._ IEEE S&P 2025.
+- **Zerocash**: Ben-Sasson et al. _Decentralized anonymous payments from Bitcoin._ IEEE S&P 2014.
+- **Poseidon**: Grassi, Khovratovich, Rechberger, Roy, Schofnegger. USENIX Security 2021.
+- **Griffin**: Grassi et al. CRYPTO 2023.
+- **sonobe**: [github.com/privacy-ethereum/sonobe](https://github.com/privacy-ethereum/sonobe). The Rust folding-scheme library PlasmaBlind builds on.
