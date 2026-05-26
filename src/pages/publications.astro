@@ -1,0 +1,110 @@
+---
+import Layout from "../components/layout.astro";
+import IndexIcon from "../components/icons/Index.astro";
+import Link from "../components/icons/Link.astro";
+
+const publications = [
+  {
+    title:
+      "Zero-Knowledge Proofs of Generalized Regular Expression Matching for Anonymized Email Verification",
+    authors: [
+      { name: "Shreyas Londhe", affiliation: "ZK Email", me: true },
+      { name: "Aayush Gupta", affiliation: "ZK Email" },
+      { name: "Yogesh Shahi", affiliation: "ZK Email" },
+      { name: "Rute Figueiredo", affiliation: "ZK Email" },
+      { name: "Sora Suegami", affiliation: "Ethereum Foundation" },
+      { name: "Parisa Hassanizadeh", affiliation: "IPPT PAN" },
+      { name: "Shahriar Ebrahimi", affiliation: "Alan Turing Institute" },
+    ],
+    venue: "Proceedings on Privacy Enhancing Technologies (PoPETs) 2026, Issue 4",
+    status: "To appear",
+    description:
+      "ZK regex primitive based on ε-free NFA path verification, yielding prover complexity linear in input length and independent of regex complexity. Integrated into ZK Email to enable full DKIM-compliant verification (RSA-SHA256, RFC 6376) with 2–6× faster proving over prior DFA-based approaches.",
+    abstract:
+      "Digital communication increasingly underpins identity, financial transactions, and regulatory compliance. In many settings, possession of a DKIM-signed email serves as evidence of account control, transaction confirmation, or institutional affiliation. Yet demonstrating such properties typically requires revealing the full email or relying on centralized intermediaries, introducing privacy risks and additional trust assumptions. A framework called ZK Email addresses this limitation by applying zero-knowledge proofs (ZKPs) to email verification, enabling publicly verifiable proofs of authenticity while preserving message confidentiality. However, its existing implementations struggle to support complex, real-world messages due to the inefficiency of regular-expression verification over structured formats and rich alphabets. We address this limitation with a new ZKP system for generalized regular expression (regex) matching that replaces in-circuit automaton simulation with efficient path verification over ε-free NFAs, yielding prover complexity linear in the input length and independent of the regex complexity. This approach enables practical validation of expressive standard structures required for full DKIM-signed email verification. By integrating our constructions into ZK Email, we obtain an enhanced system that combines (i) DKIM signature verification, (ii) an arbitrary-length SHA-256 circuit with partial precomputation for rsa-sha256 under RFC 6376, and (iii) a general-purpose regex primitive enforcing structural constraints over email headers and body. We formalize the associated zero-knowledge relations and analyze their security under adversarial models. We implement the system (over 40,000 lines of code released under MIT) in Circom and Noir, targeting groth16 and ultra_honk backends, and evaluate it in both client-side and zkVM (SP1) deployment settings. Experimental results on a commodity hardware demonstrate substantial efficiency improvements over prior DFA-based approaches, achieving 2–6× in proving time, while supporting a significantly richer class of regex languages.",
+    links: [
+      { label: "zk-regex", href: "https://github.com/zkemail/zk-regex" },
+      {
+        label: "zk-email-verify",
+        href: "https://github.com/zkemail/zk-email-verify",
+      },
+    ],
+  },
+];
+---
+
+<Layout
+  title="Publications"
+  description="Peer-reviewed publications by Shreyas Londhe."
+>
+  <main class="relative">
+    <div class="mb-4 lg:absolute lg:-ml-36 lg:mb-0 lg:h-full">
+      <a class="exclude flex items-center gap-x-1 lg:sticky lg:top-8" href="/"
+        ><IndexIcon /> Index
+      </a>
+    </div>
+    <header>
+      <h2 class="mb-6 font-semibold">Publications</h2>
+    </header>
+    <ul class="flex flex-col gap-y-8">
+      {
+        publications.map((pub) => (
+          <li class="border-l-2 border-transparent pl-3 transition-colors hover:border-blue-400">
+            <div class="flex flex-wrap items-baseline gap-x-2">
+              <span class="font-medium">{pub.title}</span>
+              {pub.status && (
+                <span class="rounded border border-blue-200 px-1.5 py-0.5 text-xs text-blue-500 dark:border-blue-900 dark:text-blue-400">
+                  {pub.status}
+                </span>
+              )}
+            </div>
+            <p class="mt-1 text-sm leading-snug text-neutral-500 dark:text-neutral-400">
+              {pub.authors.map((author, i) => (
+                <>
+                  <span class={author.me ? "font-medium text-neutral-700 dark:text-neutral-200" : ""}>
+                    {author.name}
+                  </span>
+                  <span class="text-neutral-400 dark:text-neutral-500">
+                    {" "}({author.affiliation})
+                  </span>
+                  {i < pub.authors.length - 1 && <span>, </span>}
+                </>
+              ))}
+            </p>
+            <p class="mt-1 text-sm text-neutral-500 italic dark:text-neutral-400">
+              {pub.venue}
+            </p>
+            <p class="mt-2 leading-snug font-light text-neutral-500 dark:text-neutral-400">
+              {pub.description}
+            </p>
+            {pub.abstract && (
+              <details class="mt-2 group">
+                <summary class="cursor-pointer text-sm text-blue-500 transition-colors select-none hover:text-blue-600 dark:hover:text-blue-400">
+                  Abstract
+                </summary>
+                <p class="mt-2 text-sm leading-relaxed font-light text-neutral-600 dark:text-neutral-400">
+                  {pub.abstract}
+                </p>
+              </details>
+            )}
+            {pub.links && pub.links.length > 0 && (
+              <div class="mt-3 flex flex-wrap gap-x-3 gap-y-1 text-sm">
+                {pub.links.map((link) => (
+                  <a
+                    href={link.href}
+                    rel="noreferrer"
+                    target="_blank"
+                    class="flex items-center text-blue-500 hover:text-blue-600 dark:hover:text-blue-400"
+                  >
+                    {link.label}
+                    <Link />
+                  </a>
+                ))}
+              </div>
+            )}
+          </li>
+        ))
+      }
+    </ul>
+  </main>
+</Layout>

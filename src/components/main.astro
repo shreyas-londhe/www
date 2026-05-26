@@ -5,25 +5,39 @@ const projects = [
   {
     label: "zk-email-verify",
     href: "github.com/zkemail/zk-email-verify",
+    role: "Core contributor @ ZkEmail",
     description:
       "Verify any text in any sent or received email, cryptographically — trusting only the sending mailserver.",
   },
   {
     label: "zk-regex v2",
     href: "github.com/zkemail/zk-regex",
+    role: "Author @ ZkEmail",
     description:
       "Regex-to-circuit compiler (Circom/Noir) with off-circuit NFA traversal and in-circuit proof.",
   },
   {
     label: "WHIR",
     href: "github.com/WizardOfMenlo/whir",
+    role: "Contributor",
     description:
       "Reed–Solomon proximity testing with super-fast verification. Added batch prove/verify and recursive verification support.",
   },
   {
     label: "ProveKit",
     href: "github.com/worldfnd/provekit",
+    role: "Contributor @ World",
     description: "Client-side zero-knowledge proving.",
+  },
+];
+
+const publications = [
+  {
+    title:
+      "Zero-Knowledge Proofs of Generalized Regular Expression Matching for Anonymized Email Verification",
+    venue: "PoPETs 2026, Issue 4",
+    status: "To appear",
+    href: "/publications",
   },
 ];
 
@@ -52,7 +66,25 @@ const socials = [
 ---
 
 <main>
-  <section class="mt-8">
+  <section
+    class="animate-intro mt-8 opacity-0 [animation-delay:0.3s]"
+    aria-label="Latest"
+  >
+    <a
+      href="/publications"
+      class="exclude group inline-flex max-w-full items-center gap-x-2 rounded-full border border-blue-200 bg-blue-50/60 px-3 py-1 text-sm transition-colors hover:bg-blue-50 dark:border-blue-900/60 dark:bg-blue-950/30 dark:hover:bg-blue-950/60"
+    >
+      <span class="rounded-full bg-blue-500 px-1.5 py-0.5 text-[10px] font-medium tracking-wide text-white uppercase">
+        New
+      </span>
+      <span class="truncate text-neutral-700 dark:text-neutral-200">
+        ZK Regex paper accepted at PoPETs 2026
+      </span>
+      <span class="text-blue-500 transition-transform group-hover:translate-x-0.5">→</span>
+    </a>
+  </section>
+
+  <section class="mt-10">
     <h2
       class="animate-intro mb-3 font-medium opacity-0 [animation-delay:0.35s]"
     >
@@ -73,6 +105,9 @@ const socials = [
               {project.label}
               <Link />
             </a>
+            <p class="mt-0.5 text-sm text-neutral-500 dark:text-neutral-400">
+              {project.role}
+            </p>
             <p class="mt-1 leading-snug font-light text-neutral-500 dark:text-neutral-400">
               {project.description}
             </p>
@@ -80,23 +115,52 @@ const socials = [
         ))
       }
     </ul>
-    <section class="animate-intro mt-12 opacity-0 [animation-delay:0.45s]">
-      <h2 class="mb-3 font-medium"><span class="text-blue-500">—</span> Connect</h2>
-      <div class="flex flex-row flex-wrap items-center gap-x-1 gap-y-2">
-        {
-          socials.map((social) => (
+  </section>
+
+  <section class="animate-intro mt-12 opacity-0 [animation-delay:0.45s]">
+    <h2 class="mb-3 font-medium">
+      <span class="text-blue-500">—</span> Publications
+    </h2>
+    <ul class="flex flex-col gap-y-4">
+      {
+        publications.map((pub) => (
+          <li class="transition-transform hover:translate-x-0.5">
             <a
-              href={social.href}
-              target="_blank"
-              rel="noreferrer"
-              class="exclude flex items-center rounded-full bg-neutral-200 px-3 py-1 text-sm transition-all select-none hover:scale-105 hover:bg-blue-50 dark:bg-neutral-800 dark:hover:bg-blue-950"
+              href={pub.href}
+              class="flex w-fit items-baseline gap-x-2"
             >
-              {social.label}
-              <Link />
+              <span class="leading-snug">{pub.title}</span>
             </a>
-          ))
-        }
-      </div>
-    </section>
+            <p class="mt-1 text-sm text-neutral-500 dark:text-neutral-400">
+              <span class="italic">{pub.venue}</span>
+              {pub.status && (
+                <span class="ml-2 rounded border border-blue-200 px-1.5 py-0.5 text-xs text-blue-500 dark:border-blue-900 dark:text-blue-400">
+                  {pub.status}
+                </span>
+              )}
+            </p>
+          </li>
+        ))
+      }
+    </ul>
+  </section>
+
+  <section class="animate-intro mt-12 opacity-0 [animation-delay:0.5s]">
+    <h2 class="mb-3 font-medium"><span class="text-blue-500">—</span> Connect</h2>
+    <div class="flex flex-row flex-wrap items-center gap-x-1 gap-y-2">
+      {
+        socials.map((social) => (
+          <a
+            href={social.href}
+            target="_blank"
+            rel="noreferrer"
+            class="exclude flex items-center rounded-full bg-neutral-200 px-3 py-1 text-sm transition-all select-none hover:scale-105 hover:bg-blue-50 dark:bg-neutral-800 dark:hover:bg-blue-950"
+          >
+            {social.label}
+            <Link />
+          </a>
+        ))
+      }
+    </div>
   </section>
 </main>
