@@ -59,12 +59,12 @@ The matrices $A, B, C$ are public—they define the computation. The prover's jo
 
 The key to Spartan (and many modern proof systems) is viewing data structures—vectors and matrices—as polynomials. This lets us use polynomial techniques like the sum-check protocol.
 
-**The idea**: Any function $f: \\{0,1\\}^n \to \mathbb{F}$ (mapping $n$-bit binary strings to field elements) has a unique **multilinear extension** $\tilde{f}: \mathbb{F}^n \to \mathbb{F}$ that:
+**The idea**: Any function $f: \{0,1\}^n \to \mathbb{F}$ (mapping $n$-bit binary strings to field elements) has a unique **multilinear extension** $\tilde{f}: \mathbb{F}^n \to \mathbb{F}$ that:
 
-1. Agrees with $f$ on all boolean inputs: $\tilde{f}(b) = f(b)$ for all $b \in \\{0,1\\}^n$
+1. Agrees with $f$ on all boolean inputs: $\tilde{f}(b) = f(b)$ for all $b \in \{0,1\}^n$
 2. Is multilinear: linear in each variable individually
 
-**Vectors as polynomials**: A vector $v$ of length $2^n$ can be viewed as a function $f: \\{0,1\\}^n \to \mathbb{F}$ where $f(b) = v[\text{int}(b)]$ (interpreting the binary string as an index). Its MLE $\tilde{v}(x_1, \ldots, x_n)$ is a polynomial that "encodes" the entire vector.
+**Vectors as polynomials**: A vector $v$ of length $2^n$ can be viewed as a function $f: \{0,1\}^n \to \mathbb{F}$ where $f(b) = v[\text{int}(b)]$ (interpreting the binary string as an index). Its MLE $\tilde{v}(x_1, \ldots, x_n)$ is a polynomial that "encodes" the entire vector.
 
 **Matrices as polynomials**: Similarly, an $m \times n$ matrix $M$ (with $m = 2^s$, $n = 2^t$) becomes a polynomial $\tilde{M}(x, y)$ in $s + t$ variables, where:
 
@@ -88,21 +88,21 @@ The sum-check protocol is the engine that powers Spartan. It lets a prover convi
 
 **The claim**: Given an $n$-variate polynomial $g(x_1, \ldots, x_n)$, the prover claims:
 
-$$H = \sum_{b \in \\{0,1\\}^n} g(b_1, \ldots, b_n)$$
+$$H = \sum_{b \in \{0,1\}^n} g(b_1, \ldots, b_n)$$
 
 Naively, verifying this requires $2^n$ evaluations. Sum-check reduces it to a single evaluation at a random point.
 
 **The protocol** (interactive, $n$ rounds):
 
 0. **Round 0 (Setup)**:
-   - Prover computes the sum $H = \sum_{b \in \\{0,1\\}^n} g(b)$
+   - Prover computes the sum $H = \sum_{b \in \{0,1\}^n} g(b)$
    - Prover sends claimed sum $H$ to verifier
 
-1. **Round 1**: Prover sends univariate polynomial $s_1(X_1) = \sum_{b_2, \ldots, b_n \in \\{0,1\\}} g(X_1, b_2, \ldots, b_n)$
+1. **Round 1**: Prover sends univariate polynomial $s_1(X_1) = \sum_{b_2, \ldots, b_n \in \{0,1\}} g(X_1, b_2, \ldots, b_n)$
    - Verifier checks: $s_1(0) + s_1(1) = H$
    - Verifier sends random challenge $r_1$
 
-2. **Round 2**: Prover sends $s_2(X_2) = \sum_{b_3, \ldots, b_n \in \\{0,1\\}} g(r_1, X_2, b_3, \ldots, b_n)$
+2. **Round 2**: Prover sends $s_2(X_2) = \sum_{b_3, \ldots, b_n \in \{0,1\}} g(r_1, X_2, b_3, \ldots, b_n)$
    - Verifier checks: $s_2(0) + s_2(1) = s_1(r_1)$
    - Verifier sends random challenge $r_2$
 
@@ -130,7 +130,7 @@ Here's Spartan's key insight: R1CS satisfiability can be expressed as a polynomi
 
 Recall the R1CS condition: for a valid witness $z$, we need:
 
-$$(Az)_i \times (Bz)_i = (Cz)_i \quad \text{for all } i \in \\{1, \ldots, m\\}$$
+$$(Az)_i \times (Bz)_i = (Cz)_i \quad \text{for all } i \in \{1, \ldots, m\}$$
 
 Let's rewrite this using MLEs. Define:
 
@@ -139,9 +139,9 @@ Let's rewrite this using MLEs. Define:
 
 The matrix-vector product $(Az)_i$ becomes a sum over the MLE:
 
-$$(Az)_i = \sum_{j} A_{i,j} \cdot z_j = \sum_{y \in \\{0,1\\}^{\log n}} \widetilde{A}(i, y) \cdot \widetilde{z}(y)$$
+$$(Az)_i = \sum_{j} A_{i,j} \cdot z_j = \sum_{y \in \{0,1\}^{\log n}} \widetilde{A}(i, y) \cdot \widetilde{z}(y)$$
 
-Now, R1CS satisfaction means: for every row $x \in \\{0,1\\}^{\log m}$:
+Now, R1CS satisfaction means: for every row $x \in \{0,1\}^{\log m}$:
 
 $$\left(\sum_y \widetilde{A}(x, y) \cdot \widetilde{z}(y)\right) \times \left(\sum_y \widetilde{B}(x, y) \cdot \widetilde{z}(y)\right) = \sum_y \widetilde{C}(x, y) \cdot \widetilde{z}(y)$$
 
@@ -149,7 +149,7 @@ $$\left(\sum_y \widetilde{A}(x, y) \cdot \widetilde{z}(y)\right) \times \left(\s
 
 **The $\tau$ trick**: Instead of checking all $m$ equations, the verifier picks a random $\tau \in \mathbb{F}^{\log m}$ and we check a random linear combination:
 
-$$\sum_{x \in \\{0,1\\}^{\log m}} \widetilde{eq}(\tau, x) \cdot \left[ \left(\sum_y \widetilde{A}(x, y) \cdot \widetilde{z}(y)\right) \cdot \left(\sum_y \widetilde{B}(x, y) \cdot \widetilde{z}(y)\right) - \sum_y \widetilde{C}(x, y) \cdot \widetilde{z}(y) \right] = 0$$
+$$\sum_{x \in \{0,1\}^{\log m}} \widetilde{eq}(\tau, x) \cdot \left[ \left(\sum_y \widetilde{A}(x, y) \cdot \widetilde{z}(y)\right) \cdot \left(\sum_y \widetilde{B}(x, y) \cdot \widetilde{z}(y)\right) - \sum_y \widetilde{C}(x, y) \cdot \widetilde{z}(y) \right] = 0$$
 
 Here $\widetilde{eq}(\tau, x)$ acts as a "random weight" for each constraint. If the R1CS is satisfied, every term in the brackets is zero, so the sum is zero. If any constraint is violated, the sum is non-zero with high probability (by Schwartz-Zippel).
 
@@ -161,11 +161,11 @@ The polynomial inside the sum has degree 3 overall (but still multilinear in $x$
 
 We now have a sum to verify:
 
-$$\sum_{x \in \\{0,1\\}^s} \underbrace{\widetilde{eq}(\tau, x) \cdot \left[ A_z(x) \cdot B_z(x) - C_z(x) \right]}_{F(x)} = 0$$
+$$\sum_{x \in \{0,1\}^s} \underbrace{\widetilde{eq}(\tau, x) \cdot \left[ A_z(x) \cdot B_z(x) - C_z(x) \right]}_{F(x)} = 0$$
 
 where $s = \log m$ and we define:
 
-- $A_z(x) = \sum_{y \in \\{0,1\\}^t} \widetilde{A}(x, y) \cdot \widetilde{z}(y)$ — the MLE of vector $Az$
+- $A_z(x) = \sum_{y \in \{0,1\}^t} \widetilde{A}(x, y) \cdot \widetilde{z}(y)$ — the MLE of vector $Az$
 - $B_z(x)$ and $C_z(x)$ defined similarly
 - $t = \log n$ where $n$ is the witness length
 
@@ -184,7 +184,7 @@ $$F(r_x) = \widetilde{eq}(\tau, r_x) \cdot \left[ A_z(r_x) \cdot B_z(r_x) - C_z(
 
 The verifier can compute $\widetilde{eq}(\tau, r_x)$ easily (it's a product of $s$ terms). But to compute $A_z(r_x)$, $B_z(r_x)$, and $C_z(r_x)$, they need:
 
-$$A_z(r_x) = \sum_{y \in \\{0,1\\}^t} \widetilde{A}(r_x, y) \cdot \widetilde{z}(y)$$
+$$A_z(r_x) = \sum_{y \in \{0,1\}^t} \widetilde{A}(r_x, y) \cdot \widetilde{z}(y)$$
 
 This is another sum over the boolean hypercube—with $2^t$ terms!
 
@@ -200,13 +200,13 @@ $$v_A = A_z(r_x), \quad v_B = B_z(r_x), \quad v_C = C_z(r_x)$$
 
 But why should the verifier believe these values? We need to verify that:
 
-$$v_A = \sum_{y \in \\{0,1\\}^t} \widetilde{A}(r_x, y) \cdot \widetilde{z}(y)$$
+$$v_A = \sum_{y \in \{0,1\}^t} \widetilde{A}(r_x, y) \cdot \widetilde{z}(y)$$
 
 (and similarly for $v_B$ and $v_C$).
 
 **Combining three claims into one**: Instead of running three separate sum-checks, the verifier sends random challenges $\rho_A, \rho_B, \rho_C$ and we verify a single combined claim:
 
-$$\rho_A \cdot v_A + \rho_B \cdot v_B + \rho_C \cdot v_C = \sum_{y \in \\{0,1\\}^t} \left( \rho_A \cdot \widetilde{A}(r_x, y) + \rho_B \cdot \widetilde{B}(r_x, y) + \rho_C \cdot \widetilde{C}(r_x, y) \right) \cdot \widetilde{z}(y)$$
+$$\rho_A \cdot v_A + \rho_B \cdot v_B + \rho_C \cdot v_C = \sum_{y \in \{0,1\}^t} \left( \rho_A \cdot \widetilde{A}(r_x, y) + \rho_B \cdot \widetilde{B}(r_x, y) + \rho_C \cdot \widetilde{C}(r_x, y) \right) \cdot \widetilde{z}(y)$$
 
 This is another sum-check! Let's define:
 

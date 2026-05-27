@@ -357,7 +357,7 @@ $$z = (x, y), \quad x, y \in \mathbb F^{\log k}.$$
 Think of $x$ as "picks a row of $M$" and $y$ as "picks a column of $M$."
 
 The prover sends an intermediate vector $\mathsf{eval} \in \mathbb F^k$, which is _supposed_ to be the function
-$$q(b) = \hat m(x, b), \quad b \in \\{0,1\\}^{\log k}$$
+$$q(b) = \hat m(x, b), \quad b \in \{0,1\}^{\log k}$$
 — i.e., the "row of $M$ picked by $x$," viewed as a function on $\log k$ boolean inputs.
 
 (Reality check: $q$ is a vector of $k$ base-field values, one for each of the $2^{\log k} = k$ boolean choices of $b$. It's small.)
@@ -378,7 +378,7 @@ If this passes, we believe $\mathsf{eval}$'s extension evaluated correctly at $y
 Why should the verifier believe $\mathsf{eval}$ is the real $q$? Because of a beautiful algebraic identity.
 
 Since $\hat m$ is multilinear, we can write
-$$q(b) = \hat m(x, b) = \sum_{a \in \\{0,1\\}^{\log k}} \mathsf{eq}(x, a) \cdot M(a, b).$$
+$$q(b) = \hat m(x, b) = \sum_{a \in \{0,1\}^{\log k}} \mathsf{eq}(x, a) \cdot M(a, b).$$
 That sum is exactly a linear combination of the rows of $M$, weighted by the equality coefficient vector $\mathsf{eq}_x$. In matrix form:
 $$q = \mathsf{eq}_x^T M.$$
 So $q$ is the row-vector you get from multiplying $\mathsf{eq}_x$ (a specific, structured row vector) into $M$. And because $C$ is linear, applying $C$ gives

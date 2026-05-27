@@ -118,7 +118,7 @@ We have the relation. The trick now is to prove it efficiently using a Spartan-s
 
 **The localization.** For a prime $q$, define
 
-$$\mathbb Z_{(q)} = {a/b \in \mathbb Q : q \nmid b\\}.$$
+$$\mathbb Z_{(q)} = {a/b \in \mathbb Q : q \nmid b\}.$$
 
 These are the rationals whose denominator (in lowest form) isn't divisible by $q$. $\mathbb Z_{(q)}$ is a _subring_ of $\mathbb Q$ — it's closed under addition and multiplication, contains $1$, and contains $\mathbb Z$ as a sub-subring. Critically, $\mathbb Z_{(q)}$ admits a ring homomorphism to $\mathbb F_q$:
 
@@ -197,7 +197,7 @@ Lemma 2.1 only bites when the witness is bit-size-bounded. The Zip PCS in Part 2
 
 **Lookup, lifted.** A lookup relation asserts that every entry of a witness vector $\mathbf a$ appears somewhere in a public table $\mathbf t$. Formally,
 
-$$\mathsf{REL}_{\mathsf{Look}, \mathbb Q} = {(\mathbf x; \mathbf w) : \mathbf a \in \mathbb Q_B^{n_a}, \mathbf t \in \mathbb Q_B^{n_t}, \\{a_i\\} \subseteq \\{t_j\\}\\}.$$
+$$\mathsf{REL}_{\mathsf{Look}, \mathbb Q} = {(\mathbf x; \mathbf w) : \mathbf a \in \mathbb Q_B^{n_a}, \mathbf t \in \mathbb Q_B^{n_t}, \{a_i\} \subseteq \{t_j\}\}.$$
 
 The same lifting trick works: define a projected version $\phi_q(\mathsf{REL}_{\mathsf{Look}, \mathbb Z_{(q)}})$, build a PIOP over $\mathbb F_q$ for it (any of the standard lookup arguments — Lasso, LogUp), and wrap it in the same Protocol-1-shaped construction.
 
