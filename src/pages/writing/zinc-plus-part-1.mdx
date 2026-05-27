@@ -1,0 +1,265 @@
+---
+layout: ../../components/blog-post.astro
+title: "Zinc+ I: Universal Constraint Systems and Native Bitwise Arithmetization"
+description: "Part 1 of a Zinc+ walkthrough — building UCS and the three-step PIOR that arithmetizes XOR, rotation, and modular arithmetic natively via ideal-membership over polynomial rings"
+pubDate: "2026-05-27"
+tags: ["zero-knowledge", "snarks", "integer-arithmetic"]
+---
+
+## What problem are we solving?
+
+[Zinc](/writing/zinc-part-1) bought back native integer arithmetic for hash-based SNARKs. R1CS, but over $\mathbb Z$ — multi-modulus, no hidden-order groups, plausibly post-quantum. Anything that's _arithmetic_ on bounded integers (RSA-style modular reduction, signed comparisons, multi-modulus statements, FHE-flavored sums) drops in.
+
+What Zinc does not give you for free: **bitwise operations**. XOR, AND, rotation, shift, modular reduction mod $2^w$. These aren't polynomial relations over $\mathbb Z$ — they're properties of a number's _binary representation_. To handle them in Zinc you still bit-decompose each $w$-bit word into $w$ Boolean witnesses, prove the decomposition with a lookup, then re-express the bitwise op as a field-arithmetic identity over those bits. A SHA-256 compression round, with its chain of XOR / AND / rotate operations on 32-bit words, fans out into many tens of constraints per round. Witness inflation factor: roughly order $w$ per word.
+
+That overhead matters because, in production systems, the dominant cost is witness-shaped. In Zinc Part 1 we noted the >80% trace + low-degree-extension + commit number from Stwo. The Zinc+ paper frames the bit-decomposition cost more conservatively as "one or more orders of magnitude" inflation; whichever multiplier you pick, the prover pays it for every bitwise operation.
+
+**Zinc+** (Abdugafarov, Garreta, Kumar, Osadnik, Vesely, Vlasov, Zheng — Nethermind Research et al., 2026) is the follow-up that closes this gap. It extends Zinc with two new pieces:
+
+- **UCS (Universal Constraint System).** A new arithmetization relation that types witnesses in polynomial rings — $\mathbb Q[X]$, $\mathbb F_q[X]$, $\mathbb Z[X]$ — and supports a new kind of constraint: **ideal membership**, $Q(b, x, w) \in I$ for an ideal $I$ of the constraint ring. Ideal membership is what lets you write XOR, rotation, modular reduction as one-line constraints instead of decomposed lookups.
+- **Zinc+ PIOP compiler.** A three-step PIOR (polynomial interactive oracle reduction) that turns any finite-field PIOP into a PIOP for UCS. The steps: project the constraint ring down to a prime field, batch all the per-row ideal-membership checks into one polynomial-identity check, then project that polynomial down to a scalar equation. Whatever finite-field PIOP you already have (Spartan, HyperPlonk, anything sumcheck-shaped) runs unchanged on top.
+
+End-to-end on a MacBook Air M4, the paper reports proving 7 SHA-256 compressions followed by the multi-scalar-multiplication portion of ECDSA verification in **40.6 ms prover time, 7.0 ms verifier time, 198 KB proof**, at 100 bits of security.
+
+This article is **Part 1** of a two-part walkthrough. Here we cover UCS and the Zinc+ PIOR — the arithmetization story and the compiler that drives it. **Part 2** will build **Zip+**, the polynomial commitment scheme that compiles the PIOR into a real argument, along with the new linear-code family it's instantiated with — **IPRS** (Integer Pseudo-Reed–Solomon) codes.
+
+|                   | Zinc                              | Zinc+                                                                  |
+| ----------------- | --------------------------------- | ---------------------------------------------------------------------- |
+| Witness typing    | $\mathbb Z$ / $\mathbb Q$         | $\mathbb Q[X]$, $\mathbb F_{q_i}[X]$ (multiple rings)                  |
+| Native arithmetic | integer, multi-modulus            | integer, multi-modulus, **bitwise, rotation, mod $2^w$**               |
+| Constraint forms  | algebraic equality                | algebraic equality + **ideal membership** $Q \in I$                    |
+| Inner PIOP        | Spartan-shaped over $\mathbb F_q$ | any finite-field PIOP (Spartan, HyperPlonk, $\ldots$)                  |
+| PCS               | Zip (Brakedown over $\mathbb Q$)  | Zip+ (Brakedown over $\mathbb Q$ with IPRS codes; Part 2)              |
+| Plug-in mode      | end-to-end SNARK                  | end-to-end **or** lightweight "add-on" to existing $\mathbb F_q$ SNARK |
+
+**Prerequisites.** You should have read [Zinc Part 1](/writing/zinc-part-1) and [Part 2](/writing/zinc-part-2). The random-prime trick, the localization $\mathbb Z_{(q)}$, the projection $\phi_q: \mathbb Z_{(q)} \to \mathbb F_q$, the R1CSℓ relation, and the Spartan-shaped sumcheck appear here without re-derivation. You do _not_ need prior commutative-algebra background — the next subsection unpacks polynomial rings and ideals from scratch with engineer-friendly definitions, and everything else load-bearing is built up as we go.
+
+**What we won't cover.** Zip+ internals, IPRS code construction, the bit-size and well-definedness enforcement that the PCS layer adds on top of the PIOR — all in Part 2.
+
+### A glossary before we touch the protocol
+
+A few symbols recur throughout. Worth getting into your head up front:
+
+- **$R$** — a base commutative ring. Throughout, $R \in \{\mathbb Q, \mathbb F_q\}$ (we mostly avoid $\mathbb Z$ for technical reasons; see §5).
+- **$R[X]$** — the polynomial ring over $R$. Zinc+ witnesses are vectors of polynomials in $R[X]$.
+- **$R^{<d,B}[X]$** — polynomials of degree $< d$ with $R$-coefficients of bit-size $< B$. The "small polynomial" subset that honest provers commit to.
+- **$\{0,1\}^{<w}[X]$** — bit-polynomials: polynomials of degree $< w$ with coefficients in $\{0,1\}$. Used to represent $w$-bit strings. A natural bijection with $[0,2^w)$ via evaluation at $X = 2$.
+- **$I = (g)$** — a principal ideal of $R[X]$ generated by a monic polynomial $g$. The new primitive: constraints have the form $Q(\cdot) \in (g)$.
+- **$\phi_{q_0}$** — the **prime projection** $\mathbb Z_{(q_0)}[X] \to \mathbb F_{q_0}[X]$, reducing every coefficient mod $q_0$. Same map as Zinc's $\phi_q$, lifted to polynomials in $X$.
+- **$\iota_{\tilde q}$** — the **canonical embedding** $\mathbb F_q[X] \hookrightarrow \mathbb F_{\tilde q}[X]$ for an extension $\mathbb F_{\tilde q} \supseteq \mathbb F_q$. Used when the base ring is already a finite field but too small to give negligible Schwartz–Zippel error.
+- **$\psi_a$** — the **evaluation map** $\mathbb F_{\tilde q}[X] \to \mathbb F_{\tilde q}$, $f \mapsto f(a)$. A ring homomorphism for any fixed $a \in \mathbb F_{\tilde q}$.
+- **$\tilde q$** — the "final" finite field the PIOR lands in. $\tilde q = q_0$ when the base ring is $\mathbb Q$; $\tilde q = q^\ell$ when the base ring is $\mathbb F_q$ with $\ell$ chosen so $|\mathbb F_{\tilde q}| = \Omega(2^\lambda)$.
+- **$\hat v(X)$** — the bit-polynomial representation of an integer $v \in [0, 2^w)$: $\hat v(X) = \sum_{i=0}^{w-1} v_i X^i$ where $v_i$ is bit $i$ of $v$. So $\hat v(2) = v$.
+- **$[[\,\cdot\,]]$** — oracle access. $[[\tilde f]]$ means the verifier holds an oracle for the multilinear extension of $f$ and can query evaluations at any point.
+- **$\beta, \nu$** — a query point $\beta \in \mathbb F_{\tilde q}^\nu$, where $\nu = \log_2 m$ is the number of MLE variables for a witness vector of length $m$.
+- **PIOR vs PIOP.** A PIOR is an interactive _reduction_ — it transforms one claim into another and is then composed with a PIOP for the reduced claim. Zinc+'s three-step compiler is a PIOR; the full protocol is "Zinc+ PIOR composed with any finite-field PIOP."
+
+### Two definitions: polynomial rings and ideals
+
+If you're already at home with ring theory, skip to the next section. Otherwise — these two words show up on every page, so it's worth two minutes to pin them down operationally.
+
+**Polynomial ring $R[X]$.** Pick a base ring $R$ (think $R = \mathbb Z$, $\mathbb Q$, or $\mathbb F_q$ — the integers, the rationals, or a prime field). The polynomial ring $R[X]$ is the set of all polynomials $a_0 + a_1 X + a_2 X^2 + \cdots + a_d X^d$ whose coefficients $a_i$ are elements of $R$. You add them coefficient-wise and multiply them the usual way (distribute, collect like terms). That's it. $\mathbb Q[X]$ is "polynomials with rational coefficients." $\mathbb F_2[X]$ is "polynomials with 0/1 coefficients, where $1 + 1 = 0$." Engineers can think of a polynomial $\hat v(X) = v_0 + v_1 X + \cdots + v_{w-1} X^{w-1}$ as just a length-$w$ vector $(v_0, \ldots, v_{w-1})$ with a few extra algebraic operations available — multiplication is convolution, reduction modulo some $g(X)$ is "fold the high entries back into the low ones according to $g$."
+
+**Ideal $(g) \subseteq R[X]$.** An ideal generated by a polynomial $g(X)$ is the set of all multiples of $g$ inside $R[X]$:
+
+$$(g) = {g(X) \cdot h(X) : h(X) \in R[X]\\}.$$
+
+Saying "$p(X) \in (g)$" is the polynomial-ring analog of saying "$n$ is divisible by $7$" in $\mathbb Z$ (which is the ideal $(7) \subseteq \mathbb Z$). Equivalently, $p(X) \in (g)$ iff $p(X) \bmod g(X) = 0$ — divide $p$ by $g$, get remainder zero.
+
+**The one trick worth remembering.** When $g(X) = X - c$ for some constant $c \in R$, ideal membership has a clean operational reading:
+
+$$p(X) \in (X - c) \quad \iff \quad p(c) = 0.$$
+
+That's the "factor theorem" from high-school algebra. Why: $p(X) = (X - c) \cdot h(X)$ for some $h$ iff plugging in $X = c$ kills $p$. Half the UCS examples below are this trick — pick $c = 2$ to talk about bitstring-to-integer conversion, pick the right $g$ to talk about rotation, etc. If $g$ is more complicated than $X - c$ (e.g., $g = X^w - 1$ for rotation), the same intuition lifts: $p \in (g)$ means "$p$ is zero in the quotient ring $R[X] / (g)$," which is the ring you get by setting $g(X) = 0$ and reducing everything mod $g$.
+
+That's all the algebra. Three sentences: $R[X]$ is polynomials with coefficients in $R$; $(g)$ is multiples of $g$; $p \in (X - c)$ means $p(c) = 0$. The rest of the article builds on these.
+
+## The bitwise wall Zinc still hits
+
+Zinc handles a 32-bit integer multiplication mod $2^{32}$ in one R1CSℓ row: write the constraint $z_1 \cdot z_2 = z_3 + 2^{32} \cdot u$ over $\mathbb Z$, where $u$ is the integer-quotient witness. One row, two multiplications, done.
+
+XOR doesn't have that shape. There's no polynomial $P$ over $\mathbb Z$ such that $P(a, b) = a \oplus b$ for all 32-bit $a, b$ — XOR is a property of the bits of $a$ and $b$, and bits are not algebraically definable in $\mathbb Z$. The standard workaround:
+
+1. Bit-decompose each 32-bit word $a$ into 32 Boolean witnesses $a_0, \ldots, a_{31}$.
+2. Add 32 lookup constraints enforcing $a_i \in \{0, 1\}$ (or a single bulk lookup against a 2-element table).
+3. Constrain consistency: $a = \sum_i a_i \cdot 2^i$.
+4. Express XOR as $32$ field-level identities $(a \oplus b)_i = a_i + b_i - 2 a_i b_i$.
+5. Repeat for AND, rotation, shift — each with its own field-level identity over the bit-decomposed witness.
+
+For a single XOR of two 32-bit words: 64 Boolean lookups + 2 sum constraints + 32 XOR identities. Multiply by SHA-256's $64$ rounds, each with several XOR/AND/rotate operations on $32$-bit words, and the witness for one compression balloons. The actual arithmetic — squaring, modular reduction — is dwarfed by the bookkeeping needed to expose individual bits.
+
+You can shrink the constant by switching to a binary field. **Binius** uses $\mathbb F_{2^k}$, where XOR is addition for free; **Stwo** uses Mersenne-31 and accepts the bit-decomposition cost. Binary fields help for XOR but not for AND, not for rotation, and not for modular arithmetic mod a non-power-of-two — and most cryptographic primitives use all of these together.
+
+**The Zinc+ pivot.** Don't pick one ring. Let constraints live in _several_ rings simultaneously, and use _ideal membership_ as a bridge between them.
+
+XOR has a natural home in $\mathbb F_2[X]$ (addition in $\mathbb F_2$ is XOR). Modular arithmetic mod $n$ has a natural home in $\mathbb Q[X]$ (where you can express "differs from a multiple of $n$" as the slack term $n \cdot \mu$). Rotation on a $w$-bit word is multiplication by $X$ modulo the ideal $(X^w - 1)$. Bitstring-to-integer conversion is evaluation at $X = 2$, i.e. equality modulo the ideal $(X - 2)$. Each operation lands in the ring where it's algebraically free, and a typed witness vector — entries in $\mathbb Q[X]$ but projectable to $\mathbb F_2[X]$, $\mathbb F_{q_i}[X]$, $\mathbb Q$, etc. via canonical homomorphisms — knits them together.
+
+That's UCS.
+
+## The UCS framework
+
+A UCS instance is a list of constraints. Each constraint is typed by a ring — $\mathbb Q[X]$ or some $\mathbb F_{q_i}[X]$ — and takes one of two forms:
+
+- **Algebraic equality:** $Q(b, x, w) = 0$ for all $b \in \{0, 1\}^\mu$, evaluated over the constraint ring. This is the AIR / R1CS / CCS / Plonkish family, generalized to ring-typed witnesses.
+- **Ideal membership:** $Q(b, x, w) \in (g)$ for all $b \in \{0, 1\}^\mu$, where $g$ is a monic polynomial generating the constraint ideal. This is the new primitive.
+
+A single witness vector $\hat u$ typed in $\mathbb Q[X]$ can participate in multiple constraints, each over a different ring, via canonical projection homomorphisms. Reduce coefficients mod $q_i$ to get $\phi_{q_i}(\hat u) \in \mathbb F_{q_i}[X]$. Evaluate at $X = 2$ to get $\psi_2(\hat u) \in \mathbb Q$. The same column shows up in a bit-rotation constraint over $\mathbb F_2[X]$, a modular-arithmetic constraint over $\mathbb Q[X]$, and an integer-comparison lookup — all simultaneously. When restricted to a single finite field with $I = (0)$ (the zero ideal), UCS specializes back to R1CS / CCS / AIR / Plonkish; nothing is lost.
+
+The four examples below are the workhorses. Each one is an ideal-membership constraint that replaces a chain of bit-decomposed lookups.
+
+**Example A: bitstring ↔ integer via $(X - 2)$.** Take a witness $\hat v \in \{0,1\}^{<w}[X]$ representing a $w$-bit string, and an integer witness $u$. The constraint
+
+$$\hat v - u \in (X - 2) \quad \text{over } R[X]$$
+
+forces $u$ to be the integer represented by $\hat v$. The proof in one sentence: $p(X) \in (X - 2)$ iff $p(2) = 0$, so $\hat v - u \in (X - 2)$ iff $\hat v(2) = u$, and $\hat v(2) = \sum_i v_i \cdot 2^i$ is exactly the integer the bitstring encodes. One constraint, no per-bit decomposition lookup on $u$.
+
+**Example B: rotation via $(X^w - 1)$.** Left-rotate a $w$-bit word by one position. If $\hat u \in \{0,1\}^{<w}[X]$ and $\hat b$ is supposed to be $\text{ROTL}_1(\hat u)$, the constraint
+
+$$\hat b - X \cdot \hat u \in (X^w - 1) \quad \text{over } R[X]$$
+
+does it. Why: multiplication by $X$ shifts every coefficient one position left; reducing mod $X^w - 1$ wraps the overflow bit (the one that would land at position $w$) back to position $0$. That's exactly the cyclic-rotation semantics. The general statement (right rotation by $r$ bits): $\hat b - X^{w-r} \cdot \hat u \in (X^w - 1)$ encodes $\hat b = \text{ROTR}_r(\hat u)$.
+
+**Example C: XOR via $\phi_2$.** For $\hat u, \hat v, \hat z \in \{0,1\}^{<w}[X]$,
+
+$$\hat z = \hat u \text{ XOR } \hat v \quad \iff \quad \phi_2(\hat z) = \phi_2(\hat u) + \phi_2(\hat v) \text{ in } \mathbb F_2[X].$$
+
+Read: project each bit-polynomial coefficient-wise mod 2 (so the coefficients land in $\mathbb F_2$, where $1 + 1 = 0$); the resulting addition in $\mathbb F_2[X]$ is XOR on the original bits. This gives you XOR as a one-line algebraic equality in $\mathbb F_2[X]$ on the projected witness. An alternative, valid over any $R[X]$, is the integer identity $\hat u + \hat v = \hat z + 2 \cdot \hat w$ with $\hat w = \hat u \text{ AND } \hat v$ — both forms appear in the paper's SHA-256 arithmetization, picked per slot for whatever fits the surrounding constraints best.
+
+**Example D: squaring mod $n$ in one ideal-membership constraint.** Let $\hat u, \hat v \in \{0,1\}^{<w}[X]$ represent input and output, $n \in \mathbb Z$ an arbitrary (possibly non-prime, possibly non-power-of-two) modulus, and $\mu \in \mathbb Z$ a slack witness. The constraint
+
+$$\hat v - \hat u^2 + n \cdot \mu \in (X - 2) \quad \text{over } \mathbb Q[X]$$
+
+enforces $\psi_2(\hat v) = \psi_2(\hat u)^2 \bmod n$. The slack $\mu$ is the integer quotient that absorbs the multiple of $n$, just like Zinc's R1CSℓ slack $\mathbf u$ absorbs the multiple of the row modulus. Evaluating at $X = 2$ on both sides: $\hat v(2) - \hat u(2)^2 + n \cdot \mu = 0$, i.e. $v = u^2 - n \cdot \mu$, i.e. $v \equiv u^2 \pmod n$. The integrality of $\mu$ is enforced by a lookup; everything else is one ideal-membership constraint.
+
+Compare this to the Zinc baseline: bit-decompose $u$, bit-decompose $v$, square via field arithmetic on the bits, range-check the result, prove $v$ matches the modular reduction. Dozens of constraints, hundreds of bits of witness for non-power-of-two $n$. Replaced by one ideal-membership predicate plus a small slack.
+
+**The witness-typing rule.** Honest provers commit witnesses with entries in $\mathbb Q^{<d,B}[X]$ or $\mathbb F_q^{<d}[X]$. The PCS / IOPP enforces typing into $\mathbb F, \mathbb F[X], \mathbb Q, \mathbb Q[X]$ — that's a guarantee at the commitment layer. The narrower types — $\mathbb Z$, $\mathbb Z[X]$, $\{0,1\}^{<w}[X]$, $[0, 2^w)$ — are enforced by **lookup constraints** at the PIOP layer. In practice, most "is this an integer?" checks are subsumed by upstream constraints (e.g., the squaring-mod-$n$ slack $\mu$ has its integrality enforced once and used everywhere downstream). Part 2 covers how the PCS guarantees the wider type; here we treat lookups as a primitive.
+
+## The Zinc+ PIOP compiler: a three-step PIOR
+
+Now the protocol. We have a UCS constraint of the form
+
+$$Q(b, x, w) \in (g) \quad \text{for all } b \in \{0, 1\}^\mu, \text{ over } R[X],$$
+
+where $g \in R[X]$ is a monic polynomial of degree $\geq 1$, $Q$ is a polynomial expression on the row index $b$, public input $x$, and witness $w$, and $R \in \{\mathbb Q, \mathbb F_q\}$. The prover sends an oracle to the multilinear extension $\tilde w$ of the witness. We want to reduce this to a check a standard finite-field PIOP can run.
+
+Three reduction steps do it.
+
+### Step 1 — Ring projection
+
+**If $R = \mathbb Q$.** The verifier samples a random $\Omega(\lambda)$-bit prime $q_0$ and both parties apply $\phi_{q_0}$ coefficient-wise to everything — $Q$, $x$, $w$, $g$. The constraint lands in $\mathbb F_{q_0}[X]$:
+
+$$\phi_{q_0}(Q)(b, \phi_{q_0}(x), \phi_{q_0}(w)) \in (\phi_{q_0}(g)) \quad \text{over } \mathbb F_{q_0}[X].$$
+
+Since $g$ is monic, $\phi_{q_0}(g)$ has the same degree (the leading coefficient is $1$, which is never killed by reduction mod $q_0$), so the projected ideal is non-trivial. Set $\tilde q = q_0$.
+
+**If $R = \mathbb F_q$.** Pick $\ell$ so that $\tilde q = q^\ell$ satisfies $|\mathbb F_{\tilde q}| = \Omega(2^\lambda)$ — if $q$ is already $\Omega(2^\lambda)$-bits, $\ell = 1$ and this step is the identity. Apply the canonical embedding $\iota_{\tilde q}: \mathbb F_q \hookrightarrow \mathbb F_{\tilde q}$ coefficient-wise. The constraint is now over $\mathbb F_{\tilde q}[X]$, and the embedded ideal stays the same degree.
+
+The soundness story for the $R = \mathbb Q$ branch is the polynomial version of Zinc's random-prime trick from [Part 1](/writing/zinc-part-1#why-its-knowledge-sound). If the unprojected $Q(b, x, w)$ is _not_ in $(g)$, Euclidean division in $\mathbb Q[X]$ gives $Q(b, x, w) = g \cdot h + r$ with $r \neq 0$ and $\deg r < \deg g$. Bounded-bit-size witnesses keep the coefficients of $r$ bounded; a Lemma-2.1-style argument bounds the set of primes that can kill all coefficients of $r$ at $\text{poly}(\lambda)$. With $q_0$ sampled from $\Omega(2^\lambda)$ primes, the cheat is caught with overwhelming probability. The bad-denominator branch (some entry of $w$ not in $\mathbb Z_{(q_0)}[X]$) is handled exactly as in Zinc — bit-size bounds give it negligible probability for an honest prover.
+
+The point of Step 1 isn't to do new work; it's to land the constraint in a polynomial ring _over a finite field_, which is where the remaining two steps can run with cheap arithmetic and Schwartz–Zippel-flavored soundness.
+
+### Step 2 — Ideal batching
+
+After Step 1, every constraint is of the form $Q(b, y, f) \in (g)$ for $b \in \{0,1\}^\mu$ over $\mathbb F_{\tilde q}[X]$. Notation switch: we relabel the projected public input as $y$ and the projected witness as $f$ — matching the Zinc+ paper from this point on, and reminding the reader these are post-Step-1 objects, not the originals. The constraint count is $n = 2^\mu$ separate ideal-membership checks. Batching collapses them into one.
+
+The verifier samples $r \leftarrow \mathbb F_{\tilde q}^\mu$. The prover sends a polynomial $e \in \mathbb F_{\tilde q}[X]$, claimed to be the multilinear-extension evaluation of the per-row constraint values at $r$:
+
+$$e \;=\; \sum_{b \in \{0,1\}^\mu} Q(b, y, f) \cdot \widetilde{\mathrm{eq}}(b; r).$$
+
+Both sides live in $\mathbb F_{\tilde q}[X]$ — $Q(b, y, f)$ is a polynomial in $X$ for each fixed $b$, and the sum is taken in $\mathbb F_{\tilde q}[X]$ with $\widetilde{\mathrm{eq}}(b; r) \in \mathbb F_{\tilde q}$ as scalar coefficients. The verifier (a) checks $e \in (g)$ — one polynomial division, since $\mathbb F_{\tilde q}[X]$ is a principal ideal domain and $g$ is monic — and (b) replaces the $2^\mu$ original constraints with the single strict polynomial equality
+
+$$\sum_{b \in \{0,1\}^\mu} Q(b, y, f) \cdot \widetilde{\mathrm{eq}}(b; r) \;-\; e \;=\; 0 \quad \text{in } \mathbb F_{\tilde q}[X]. \qquad (\star)$$
+
+The soundness primitive is a Schwartz–Zippel for ideal membership:
+
+> **Lemma 2.10 (informal).** Let $K$ be a field, $g \in K[X]$ a polynomial of degree $\geq 1$, and $v \in K[X]^n$ with $n = 2^\mu$. If some entry $v_b \notin (g)$, then $\Pr_{r \leftarrow S^\mu}\left[\tilde v(r) \in (g)\right] \leq \mu / |S|$ for any finite $S \subseteq K$.
+
+The proof projects onto the quotient $K[X] / (g)$ — which is a $\deg g$-dimensional $K$-vector space — and applies vanilla Schwartz–Zippel to each coordinate. If even one coordinate is non-zero in the quotient, the MLE evaluation at random $r$ misses zero with overwhelming probability.
+
+Operationally: one ideal-membership check on a single batched polynomial $e$ replaces $2^\mu$ separate ideal-membership checks. The standard sumcheck trick of "test ${\tilde v(r) = 0}$ instead of ${v = \mathbf 0}$" becomes "test $\tilde v(r) \in (g)$ instead of $v \in (g)^n$."
+
+### Step 3 — Evaluation projection
+
+We have a strict polynomial equality $(\star)$ over $\mathbb F_{\tilde q}[X]$. To hand it to a finite-field PIOP, drop the $X$. The verifier samples $a \leftarrow \mathbb F_{\tilde q}$ and evaluates both sides at $X = a$ via $\psi_a$, replacing $(\star)$ with
+
+$$\sum_{b \in \{0,1\}^\mu} \psi_a(Q)(b, \psi_a(y), \psi_a(f)) \cdot \widetilde{\mathrm{eq}}(b; r) \;-\; \psi_a(e) \;=\; 0 \quad \text{in } \mathbb F_{\tilde q}. \qquad (\star\star)$$
+
+If $(\star)$ was a non-zero polynomial in $\mathbb F_{\tilde q}[X]$ of degree $\leq d \cdot d_Q$ (where $d$ bounds the per-coefficient $X$-degree and $d_Q$ is $Q$'s total degree in its algebraic variables), evaluating at random $a$ catches it with probability $\geq 1 - d \cdot d_Q / |\mathbb F_{\tilde q}|$. For $|\mathbb F_{\tilde q}| = \Omega(2^\lambda)$, that's negligible. Standard PIT.
+
+### What the inner PIOP sees
+
+After three steps, the constraint is a plain $\mathbb F_{\tilde q}$ equation in $\psi_a(y), \psi_a(f)$. A standard finite-field PIOP $\Pi_{\mathbb F_{\tilde q}}$ — Spartan, HyperPlonk, anything sumcheck-shaped that handles your constraint type — runs on top, with:
+
+- **Public input:** $\psi_a(y)$.
+- **Witness oracles:** the same prover oracle $[[\tilde f]]$ as before, but exposing _projected_ evaluations — a query at $\beta \in \mathbb F_{\tilde q}^\nu$ returns $\widetilde{\psi_a(f)}(\beta) \in \mathbb F_{\tilde q}$.
+
+The "projected oracle" interface is what makes the inner PIOP oblivious to UCS. From its perspective, $[[\tilde f]]$ is just an $\mathbb F_{\tilde q}$-multilinear-polynomial oracle. The PCS — Zip+ in Part 2 — is what actually delivers this interface from a commitment to $f \in \mathbb Q^{<d,B}[X]$.
+
+**One subtlety.** When $R = \mathbb Q$, $\psi_a = \psi_{q_0, a}$ is only defined on $\mathbb Z_{(q_0)}[X]$, so it may be undefined on entries of $f$ whose denominator goes bad mod $q_0$. The oracle's contract is: return the projected value when defined, return $\bot$ otherwise. The verifier rejects on $\bot$. For uniformly random query points, well-definedness violations are caught with overwhelming probability — the same kind of bit-size-driven counting argument as Zinc Part 1.
+
+### What's load-bearing vs cosmetic
+
+- **Step 1** is the random-prime trick from Zinc, lifted to polynomials. Same lemma, same intuition, no new machinery.
+- **Step 2** is the genuinely new piece. Lemma 2.10 — MLE-evaluation implies ideal membership — is the soundness primitive that didn't exist in Zinc. Everything that distinguishes Zinc+ from Zinc lives here.
+- **Step 3** is vanilla Schwartz–Zippel-style polynomial identity testing.
+
+The diagram of the whole compiler:
+
+$$R[X] \xrightarrow{\;\phi_{q_0} \text{ or } \iota_{\tilde q}\;} \mathbb F_{\tilde q}[X] \xrightarrow{\;\text{MLE at } r\;} \mathbb F_{\tilde q}[X] \xrightarrow{\;\psi_a\;} \mathbb F_{\tilde q} \xrightarrow{\;\Pi_{\mathbb F_{\tilde q}}\;} \text{accept/reject}$$
+
+Top row: the ring the constraint lives in. Bottom row (implicit): the constraint shape — ideal membership, ideal membership (batched), strict equality, $\mathbb F_{\tilde q}$ equation.
+
+## The Zinc+ add-on: $\mathbb F_q$-only and bolt-on
+
+The compiler simplifies dramatically when there are no $\mathbb Q[X]$ constraints — i.e., all UCS constraints are over $\mathbb F_q[X]$ for a single fixed $q$. This is the regime the paper calls the **Zinc+ add-on**.
+
+What drops out:
+
+- **Step 1** collapses to $\iota_{\tilde q}$ (if $q$ is small) or the identity (if $q$ is already $\Omega(2^\lambda)$ bits). No prime sampling, no $\mathbb Z_{(q_0)}$ machinery, no well-definedness branch.
+- **Steps 2 and 3** stay exactly as above.
+- The PCS layer doesn't need Zip+ or any $\mathbb Q[X]$-IOPP — your existing $\mathbb F_q$ PCS, wrapped with an **interleaved commitment** (commit to each coefficient-layer $f_0, \ldots, f_{d-1}$ of $f \in \mathbb F_q^{<d}[X]$ as separate $\mathbb F_q$-multilinear polynomials), is enough. Part 2 covers the interleaving mechanics.
+
+What you get: any existing hash-based $\mathbb F_q$ SNARK gains the ability to prove ideal-membership constraints over $\mathbb F_q^{<d}[X]$ — bitwise operations, rotations, modular arithmetic over $\mathbb F_q^{<w}[X]$ — with **no modifications to existing components**. You bolt Steps 2 and 3 onto the front of the PIOP, wrap the PCS with the interleaved commitment, and you're done.
+
+Concretely, the paper notes that with $q$ a prime of $\geq 40$ bits, a SHA-256 compression can be arithmetized with a $64 \times 13$ witness trace over $\mathbb F_q^{<32}[X]$ using only linear constraints plus lookup constraints. The commitment cost amounts to committing to a vector of size $n \cdot d$ over $\mathbb F_q$ (e.g., $n \cdot 32$ for SHA-256-shaped traces); the rest of the PIOP operates on the much smaller $64 \times 13$ trace.
+
+The engineering takeaway: a UCS arithmetization for, say, SHA-256 → existing $\mathbb F_q$ PCS + a thin compatibility layer → a working SNARK. No exotic PCS, no integer machinery, no hidden-order groups.
+
+## Where we stand
+
+The stack so far:
+
+- **UCS relation.** Witnesses typed in $\mathbb Q[X]$ and/or $\mathbb F_{q_i}[X]$, with constraints of the form $Q(b, x, w) \in (g)$ over any of these rings. Generalizes R1CS / CCS / AIR / Plonkish; adds ideal-membership as a first-class primitive. Native arithmetization for XOR, AND, rotation, bitstring-integer conversion, and modular arithmetic mod arbitrary $n$.
+- **Zinc+ PIOR.** Three reduction steps — ring projection ($\phi_{q_0}$ or $\iota_{\tilde q}$), ideal batching (Lemma 2.10), evaluation projection ($\psi_a$). Reduces UCS satisfiability to a standard $\mathbb F_{\tilde q}$ equation.
+- **Inner PIOP.** Any finite-field PIOP plugs in via projected oracles.
+- **Zinc+ add-on.** $\mathbb F_q$-only case: drop ring projection, reuse your $\mathbb F_q$ PCS via interleaved commits. Lightweight bolt-on for existing hash-based SNARKs.
+
+What we have is a PIOR. What we don't yet have is the polynomial commitment infrastructure that lets a verifier query the projected oracles cheaply when $R = \mathbb Q$.
+
+## Why we're not done yet
+
+The PIOR's inner PIOP queries the prover's witness through a _projected oracle_ $[[\tilde f]]$: given a commit to $f \in \mathbb Q^{<d,B}[X]$, a verifier-sampled prime $q_0$, and a random $a \in \mathbb F_{q_0}$, the oracle has to answer evaluation queries $\widetilde{\psi_{q_0, a}(f)}(\beta)$ for arbitrary $\beta \in \mathbb F_{q_0}^\nu$. The oracle also has to enforce bit-size and well-definedness as commitment-level properties, so that Lemma-2.1-style soundness arguments survive into the PCS regime.
+
+For $R = \mathbb F_q$, your existing $\mathbb F_q$ PCS handles all of this. For $R = \mathbb Q$, you need a fresh commitment scheme. That scheme is **Zip+** — a successor to Zinc Part 2's [Zip](/writing/zinc-part-2), with three key changes: it works in the list-decoding regime up to the Mutual Correlated Agreement bound (instead of unique decoding), merges the test and evaluation phases into one, and is instantiated with a new linear code family — **IPRS** (Integer Pseudo-Reed–Solomon) — that gives MDS-optimal distance, $O(n \log n)$ FFT-based encoding, and bounded norm growth on encoded codewords. None of those three properties were available simultaneously over $\mathbb Q$ before.
+
+Part 2 will cover:
+
+- Zip+'s IOPP design for $\mathbb Q^{<d,B}[X]$-multilinear polynomials, including the projected-oracle interface and the merged test-eval phase.
+- IPRS codes — construction (the "lift the FFT, not the polynomial" trick), distance properties, encoding cost, and the norm-growth analysis.
+- Bit-size and well-definedness enforcement at the commitment layer.
+- The BCS-style compilation that turns the PIOR + PCS stack into a hash-only succinct argument for UCS.
+
+Continue to **Part 2** (forthcoming).
+
+## References
+
+- **Zinc+: SNARKs for Polynomial Rings.** Alexander Abdugafarov, Albert Garreta, Amit Kumar, Michał Osadnik, Psi Vesely, Ilia Vlasov, Kai Zhe Zheng. Nethermind Research et al., May 2026. [PDF](/zinc+.pdf)
+- **Zinc Part 1: A PIOP Over the Rationals That Bypasses Arithmetization.** [Walkthrough on this blog.](/writing/zinc-part-1)
+- **Zinc Part 2: Compiling the PIOP with Zip.** [Walkthrough on this blog.](/writing/zinc-part-2)
+- **Spartan: Efficient and General-Purpose zkSNARKs Without Trusted Setup.** Srinath Setty. CRYPTO 2020.
+- **Brakedown: Linear-time and field-agnostic SNARKs for R1CS.** Golovnev, Lee, Setty, Thaler, Wahby. CRYPTO 2023.
+- **Mod-AHP / Zartan.** Matteo Campanelli, Mathias Hall-Andersen. 2024. The prior random-prime construction Zinc and Zinc+ build on.
+- **HyperPlonk.** Chen, Bünz, Boneh, Zhang. EUROCRYPT 2023.
+- **Binius.** Diamond, Posen. 2024–2025. Binary-field SNARKs; the closest comparison point for native bitwise arithmetization.
+- **Stwo.** Haböck, Levit, Papini. 2024. Mersenne-31 hash-based SNARK referenced for the witness-cost breakdown.

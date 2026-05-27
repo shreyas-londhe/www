@@ -1,0 +1,298 @@
+---
+layout: ../../components/blog-post.astro
+title: "Zinc+ II: Zip+, IPRS Codes, and the Compiled SNARK"
+description: "Part 2 of a Zinc+ walkthrough — building Zip+ on top of Integer Pseudo Reed–Solomon codes, living in the list-decoding regime via MCA, and compiling to a hash-only SNARK"
+pubDate: "2026-05-27"
+tags: ["zero-knowledge", "snarks", "integer-arithmetic"]
+---
+
+## Where Part 1 left us
+
+[Part 1](/writing/zinc-plus-part-1) ended with an API, not a SNARK. The three-step PIOR reduced UCS satisfiability to an $\mathbb F_{\tilde q}$ equation that a standard sumcheck-shaped PIOP can handle, but the verifier's hooks into the witness — the **projected polynomial oracles** $[[\tilde f]]$ — were left as a contract:
+
+> Given a commitment to a multilinear $\tilde f$ with coefficients in $\mathbb Q^{<d,B}[X]$, a verifier-sampled random prime $q_0$, and a random $a \in \mathbb F_{q_0}$, the oracle returns $\widetilde{\psi_{q_0, a}(f)}(\beta)$ for any query point $\beta \in \mathbb F_{q_0}^\nu$ — or $\bot$ when the partial projection isn't defined.
+
+A commitment scheme has to deliver that interface. And not loosely — the contract has three teeth:
+
+- **Proximity.** The committed object has to be (close to) the encoding of an honest witness, in some Brakedown-style sense.
+- **Bit-size enforcement.** The extracted coefficients must have bit-size $\text{poly}(B)$, or Lemma 2.1's random-prime soundness from [Zinc Part 1](/writing/zinc-part-1#why-its-knowledge-sound) doesn't bite. A generic $\mathbb Q$-PCS gives unbounded extraction; that kills soundness.
+- **Well-definedness.** The committed witness must have $\psi_{q_0, a}$ defined everywhere — no entry of $f$ whose denominator is divisible by the sampled $q_0$.
+
+The scheme that delivers all three is **Zip+**. It's the successor to Zinc Part 2's [Zip](/writing/zinc-part-2), and the paper highlights exactly three changes:
+
+1. **List-decoding regime via MCA.** Zip lived in unique decoding; Zip+ pushes the proximity radius up to the Mutual Correlated Agreement bound. Smaller proofs, lower verifier work.
+2. **Merged test and evaluation phases.** Zip had two distinct random-linear-combination rounds — one for codeword-proximity, one for the tensor-identity eval. MCA's structure lets a single combo carry both.
+3. **IPRS codes instead of JEA.** A new linear code over $\mathbb Q$ with MDS-optimal distance, $O(n \log n)$ FFT-style encoding, and bounded norm growth — three properties JEA could not give simultaneously.
+
+End-to-end, the paper reports proving 7 SHA-256 compressions followed by the multi-scalar-multiplication portion of ECDSA verification in **40.6 ms prover time, 7.0 ms verifier time, 198 KB proof** on a MacBook Air M4, at 100 bits of security (same numbers as Part 1 — the headline benchmark for the full stack).
+
+This Part 2 covers Zip+ and IPRS. We restate the contract precisely, walk the three deltas, build IPRS from "lift the FFT not the polynomial," sketch MCA operationally, layer the Zip+ IOPP construction, and close with the BCS-style compilation that turns the PIOR + PCS stack into a hash-only succinct argument.
+
+**Prerequisites.** [Zinc+ Part 1](/writing/zinc-plus-part-1) — UCS, the three-step PIOR, the projected-oracle interface, Lemma 2.10. [Zinc Part 2](/writing/zinc-part-2) — Brakedown skeleton, the tensor identity, commit/test/eval phases over $\mathbb Q$, the IOPP-to-$\mathbb Z$ idea, the bit-size lemma chain. Comfort with multilinear extensions, Reed–Solomon codes, the FFT structure of RS encoders, and the localization $\mathbb Z_{(p)} \to \mathbb F_p$.
+
+**What we won't cover.** The full round-by-round knowledge soundness reduction (paper §3.2 + Appendix A.2). The general-radix IPRS encoder and full distance proof (§7). All of the batching wrappers around the core Zip+ IOPP (§6). These are load-bearing for the soundness argument but not the conceptual story.
+
+### A glossary for the rest of the article
+
+A few symbols recur — worth pinning down up front.
+
+- **$C \subseteq K^n$** — a linear code over a field $K$, dimension $k$, blocklength $n$, relative distance $\delta$.
+- **$C^J$** — the $J$-wise interleaving of $C$. A codeword in $C^J$ is a tuple $(v_1, \ldots, v_J)$ of $J$ codewords from $C$, arranged as rows of a $J \times n$ matrix.
+- **$k_1, k_2$** with $k_1 k_2 = t$ — the matrix dimensions Zip+ uses internally. Witness $W$ of length $t$ gets reshaped to $k_2 \times k_1$.
+- **$V \in K^{<d}[X]^{k_2 \times n}$** — the purported interleaved encoding of $W$ that the verifier holds an oracle on.
+- **$u_1 \in K^{k_1}, u_2 \in K^{k_2}$** — the equality vectors built from the query point $z = (z_2, z_1)$ for the tensor reformulation of the MLE eval claim.
+- **$\delta$, $\beta$** — relative minimum distance of the code; proximity parameter the IOPP runs at. Zip+ pushes $\beta$ up to (close to) $\delta$, vs. Zip's $\beta < \delta / 2$.
+- **MCA** — Mutual Correlated Agreement, the property of the code that lets soundness survive past unique decoding.
+- **$\text{IPRS}[\mathbb F_q, L, k]$** — the new code over $\mathbb Q$, parameterized by a base field $\mathbb F_q$, evaluation domain $L \subseteq \mathbb F_q$, and dimension $k$. Lives in $\mathbb Q^n$ where $n = |L|$.
+- **$\psi_{m, \xi}$** — a second-prime projection $\mathbb Z_{(m)}[X] \to \mathbb F_m$, $f \mapsto f(\xi) \bmod m$, used inside Zip+'s Layer-3 reduction when the target is a high-extension finite field.
+- **$B_0$ vs $B$** — the completeness-vs-soundness bit-size gap. Honest provers use entries of bit-size $\leq B_0$; soundness only guarantees rejection at bit-size $\geq B > B_0$. The slack is fine — the PIOR's soundness analysis tolerates a $\text{poly}(B)$ bound (Remark 2.17 of the paper).
+
+## What Zip+ has to deliver
+
+Before construction, the contract. The witness $W \in (K^{<d}[X])^t$ is reshaped as a $k_2 \times k_1$ matrix with entries in $K^{<d}[X]$, where $k_1 k_2 = t$ are both powers of $2$. Let $M \in K^{k_1 \times n}$ be a generator matrix for a linear code over $K$ with relative distance $\delta$. The honest commitment is the interleaved encoding $V \in K^{<d}[X]^{k_2 \times n}$ obtained by encoding each row of $W$ independently under $M$.
+
+The verifier holds oracle access to $V$. The claim to be checked: $\widetilde{\psi(W)}(z) = \zeta$ for some query point $z \in (K')^\mu$, $\mu = \log(k_1 k_2)$, target $\zeta \in K'$, and finite field $K'$ obtained from $K[X]$ via the projection $\psi$.
+
+**Completeness.** If $V$ is the honest interleaved encoding of some $W$ satisfying $\widetilde{\psi(W)}(z) = \zeta$ — and, when $K = \mathbb Q$, the projection $\psi(W)$ is well-defined — the verifier accepts with probability $1$.
+
+**Soundness.** The verifier rejects with high probability if any of:
+
+- $V$ is **$\beta$-far** from every interleaved encoding of a $W$ with $\widetilde{\psi(W)}(z) = \zeta$, for proximity parameter $\beta$ up to the MCA bound; or
+- $K = \mathbb Q$ and $V$ has an entry of bit-size above $\text{poly}(B)$; or
+- $K = \mathbb Q$ and $V$ has an entry whose $\psi$-projection is not well-defined.
+
+**The bit-size gap.** Honest provers use witnesses with entries in $\mathbb Q^{<d, B_0}[X]$. Soundness only catches cheaters at bit-size $\geq B$ for some $B > B_0$. This gap is real and fine — paper §2.4 footnote 8 makes the call explicitly: "it is enough for our compilation purposes to guarantee bit-size bound below $\text{poly}(B)$, not exactly below $B$." The slack gets absorbed by the PIOR's downstream Lemma-2.1-style counting argument, which already runs on $\text{poly}(\lambda)$-bit bounds.
+
+That's the contract Zip+ implements.
+
+## Three changes vs. Zip
+
+Zip+ is Zip with three surgical changes. Pin them down before the construction.
+
+**Delta 1 — list-decoding regime, MCA-bounded.** Zip's soundness analysis (Zinc Part 2's [§Testing Phase](/writing/zinc-part-2#the-testing-phase)) ran in the **unique decoding regime**: the proximity parameter $\beta$ stayed strictly below $\delta / 2$, so that "$V$ is within distance $\beta$ of *some* codeword" identified that codeword uniquely. Zip+ pushes $\beta$ all the way up to the Mutual Correlated Agreement (MCA) bound of the code — for any linear code over $\mathbb Q$ or any finite field, $\beta > (1 - \delta + \varepsilon)^{1/3}$, the so-called **1.5 Johnson bound** [[Zei24](https://eprint.iacr.org/2024/1843), [BCFW25]]. Larger $\beta$ means fewer column opens needed to hit $\lambda$ bits of soundness, which means smaller proofs and faster verification.
+
+The cost is the soundness analysis. Past unique decoding, "$V$ is close to a unique codeword" is no longer true — there's a *list* of nearby codewords, and the analysis has to argue that none of them is a successful cheat. That's where round-by-round knowledge soundness from [BCFW25] enters — we'll come back to it in the BCS section below.
+
+**Delta 2 — merged test and evaluation phases.** Zip's IOPP had two distinct phases. The **testing phase** asked "are these rows really codewords?" via one random linear combination across rows; the **evaluation phase** asked "and does that combination give the claimed evaluation?" via a second random linear combination. Two rounds, two batches of column opens. Zip+ does it in one: the same random combination used to check codeword proximity also implements the $u_2 \cdot V$ row-combine that drives the tensor identity. MCA is what makes this safe — the merged combo's soundness is exactly the MCA condition on the code.
+
+**Delta 3 — IPRS instead of JEA.** Zip was instantiated with **JEA** (Juxtaposed Expand-Accumulate) codes — small entries and linear-time encoding, but suboptimal minimum distance, which dominated the proof-size term. IPRS is a new code with **MDS-optimal distance** ($\delta = 1 - k/n + 1/n$), **$O(n \log n)$ FFT-style encoding**, and **bounded norm growth** (relative norm increase of $\sim 40$–$60$ bits in target configurations, comparable to what 64-bit-field schemes achieve). Three properties simultaneously. JEA could not.
+
+The next three sections take these deltas in order: IPRS first (the new linear-code primitive), then MCA (the soundness primitive that supports Deltas 1 and 2), then the layered IOPP construction.
+
+## IPRS: lift the FFT, not the polynomial
+
+Every code-based PCS over $\mathbb Q$ runs into a trilemma. The code needs **good minimum distance** (so the IOPP needs few queries per soundness bit), **efficient encoding** (so the prover's commit step doesn't blow up), and **bounded codeword norm growth** (so committing rationals doesn't produce kilobit-per-entry codewords). Naive constructions get two of the three. IPRS gets all three.
+
+Walk through the naive attempts first — they make the trick clear.
+
+**Naive attempt 1: RS over $\mathbb Q$.** Define the code as evaluations of rational-coefficient polynomials on a fixed integer subset $S \subseteq \mathbb Z$:
+
+$$\text{RS}_{\text{naive}}[S, k] = \{(f(\alpha))_{\alpha \in S} \mid f \in \mathbb Q^{<k}[Y]\} \subseteq \mathbb Q^n.$$
+
+Minimum distance is fine — it's the standard RS bound. Encoding is fine — same FFT-shaped algorithm as RS, just executed over $\mathbb Q$ instead of $\mathbb F_q$. **Norm is catastrophic.** A degree-$(k-1)$ polynomial evaluated at $\alpha \in S$ gives entries of order $\|x\|_\infty \cdot \|S\|_\infty^{k-1}$. For practical $k$ (say $2^{10}$) and any $\|S\|_\infty \geq 2$, codeword entries blow up to hundreds of thousands or millions of bits. The committer has to Merkle-hash all of it. Dead.
+
+**Naive attempt 2: lift the Vandermonde matrix.** Take a standard RS code $\text{RS}[\mathbb F_q, L, k]$ over a small finite field. It has a Vandermonde generator matrix $V_q$ with entries in $\{0, \ldots, q-1\}$. View $V_q$ as an integer matrix, then define the lift:
+
+$$C_{\mathbb Q}[\hat V_q] = \{\hat V_q \cdot x \mid x \in \mathbb Q^k\} \subseteq \mathbb Q^n.$$
+
+Norm growth is now fine — entries are bounded by $\|x\|_\infty \cdot q \cdot k$, so $O(\log q + \log k)$ bits per entry. Lemma 2.12 in the paper shows that lifted codes preserve both dimension and minimum distance, so the MDS property of RS survives. **But encoding has no FFT structure.** The radix-$2$ butterfly that gives RS its $O(n \log n)$ encoding relies on the fact that squaring an $n$-th root of unity gives an $(n/2)$-th root of unity — an identity that holds in $\mathbb F_q$ but is destroyed when you lift the twiddle factors to $\mathbb Z$ and stop reducing modulo $q$. Encoding collapses to $O(nk)$ naive matrix-vector multiplication. For $n = 2^{16}, k = 2^{12}$, that's $\sim 2^{28}$ rational multiplications per commit. Dead.
+
+**The IPRS trick: lift the algorithm, not the algebra.** Pick an FFT encoder for the *finite-field* RS code $\text{RS}[\mathbb F_q, L, k]$ — fix the radix (say $2$), the twiddle factors $\omega^j$ for the chosen primitive $n$-th root of unity $\omega \in \mathbb F_q$, the recursion depth. Now identify each $\mathbb F_q$ element with its **centered integer representative** via $\iota: \mathbb F_q \to \{-(q-1)/2, \ldots, (q-1)/2\} \subseteq \mathbb Z$. Execute the *same* FFT recursion — same butterfly equation $f(\omega^j) = f_0(\omega^{2j}) + \omega^j \cdot f_1(\omega^{2j})$ — but with every twiddle factor replaced by $\iota(\omega^j)$ and every operation performed over $\mathbb Z$ (or $\mathbb Q$, for rational messages) **with no modular reduction**.
+
+<img
+  src="/diagrams/zinc-plus-iprs-lift.svg"
+  alt="Side-by-side comparison of the standard RS-FFT over F_q and the IPRS-FFT lifted to Z. Both share the same butterfly structure, FFT shape, and minimum distance δ = 1 - k/n + 1/n. The lift swaps F_q twiddles ω^j for their centered integer representatives ι(ω^j) and drops modular reduction, which destroys polynomial-evaluation semantics but preserves linearity, dimension, and distance while bounding entries at ‖x‖∞ · (q/2)^(depth+1) · k."
+/>
+
+The output is no longer the evaluation vector of any polynomial. Squaring $\iota(\omega^j)$ over $\mathbb Z$ does not give $\iota(\omega^{2j})$. The "evaluations" of the recursive subproblems aren't really evaluations of anything. **And that's fine.** The IOPP doesn't need the polynomial-evaluation semantics — it needs a linear code with good distance, fast encoding, and bounded entries. The semantics was scaffolding.
+
+**Definition (paper Definition 2.13).** Given a prime $q$, a multiplicative subgroup $L = (1, \omega, \ldots, \omega^{n-1}) \subseteq \mathbb F_q$, a dimension $k < n$, and a fixed FFT algorithm for $\text{RS}[\mathbb F_q, L, k]$:
+
+$$\text{IPRS}[\mathbb F_q, L, k] := \{\text{Enc}_{\text{IPRS}}(x) \mid x \in \mathbb Q^k\} \subseteq \mathbb Q^n.$$
+
+**Properties (paper Theorem 2.14).** $\text{IPRS}[\mathbb F_q, L, k]$ is a linear code over $\mathbb Q$ of dimension $k$, blocklength $n$, and minimum relative distance $\delta = 1 - k/n + 1/n$ — **MDS-optimal**, same as RS. The norm bound:
+
+$$\|\text{Enc}_{\text{IPRS}}(x)\|_\infty \leq \|x\|_\infty \cdot (q/2)^{\text{depth}+1} \cdot k.$$
+
+In the paper's target configurations ($k \approx 2^9$ to $2^{10}$, $q \approx 2^{16}$, depth $1$–$2$, radix $8$), this works out to a **relative norm increase of roughly 40–60 bits**. Comparable to what field-native schemes achieve over $64$-bit fields when encoding small-norm messages. Far below the thousands of bits naive RS over $\mathbb Q$ would produce. The proof (paper §7.2) is a corollary of Lemma 2.12: IPRS is a lift of an RS code under a specific generator matrix (not Vandermonde), so it inherits both dimension and minimum distance.
+
+The trilemma resolved:
+
+| Construction                       | Relative norm growth         | FFT structure |
+| ---------------------------------- | ---------------------------- | ------------- |
+| Naive RS over $\mathbb Q$          | $\leq k \cdot \|S\|_\infty^{k-1}$ | yes (but moot) |
+| Lifted Vandermonde $C_\mathbb Q[\hat V_q]$ | $\leq k q$              | no            |
+| **IPRS$[\mathbb F_q, L, k]$**      | $\leq (q/2)^{\text{depth}+1} \cdot k$ | **yes**   |
+
+Concrete encoding cost: encoding a vector of length $2^{16}$ with entries in $\{0,1\}^{<32}[X]$ takes $\sim 31.84$ ms multithreaded on M4 with the paper's radix-$8$ IPRS implementation (Table 2 of the paper). Vectors of $32$-bit integers at the same length: $\sim 2.83$ ms. These are the costs upstream of the IOPP — the per-commit hash work and the per-row Merkle structure run on top.
+
+**One open question (paper §2.3.4).** Whether IPRS codes have MCA up to the **standard Johnson bound** (better than the 1.5 Johnson bound that is known to hold for all linear codes), as RS codes do. The paper proves the 1.5 Johnson bound for IPRS via the general result on $\mathbb Q$-codes; the Johnson-bound version would directly tighten Zinc+'s proof sizes. Open at time of writing.
+
+## MCA: living past unique decoding
+
+Brakedown's classical soundness needed proximity within unique decoding — $\beta < \delta / 2$ — because the analysis turned on "if $V$ is $\beta$-close to a codeword $c$, then $c$ is unique." Zip+ pushes proximity up to the **1.5 Johnson bound** $\beta > (1 - \delta + \varepsilon)^{1/3}$, well past unique decoding. The fix is MCA.
+
+**Mutual Correlated Agreement, operationally.** For two vectors $v_1, v_2 \in K^n$, consider the random linear combination $r_1 v_1 + r_2 v_2$ for random $r_1, r_2 \in K$. Each $v_i$ has an **agreement domain** $\text{ADC}_{C, \beta}(v_i) \subseteq [n]$ — the set of coordinate subsets $S$ of relative size $> 1 - \beta$ on which $v_i$ matches some codeword. The MCA property of $C$ at distance $\beta$ says: with high probability over $(r_1, r_2)$, every agreement domain of the combination $r_1 v_1 + r_2 v_2$ is contained in the **intersection** of the agreement domains of the individual $v_i$'s. (This is the "$J=2$" version; the paper states a $J$-fold generalization.)
+
+Operationally: if you take a random linear combination of $J$ purported codewords and it lands close to a codeword on some subset $S$, then *every* individual purported codeword had to be close to a codeword on the same subset $S$. The combination doesn't gain agreement that wasn't already there.
+
+**Theorem 3.4 (paper, paraphrased).** Any linear code over any field — including $\mathbb Q$ — satisfies MCA up to the **1.5 Johnson bound** $\beta > (1 - \delta + \varepsilon)^{1/3}$, with error $n / (\varepsilon |R|)$ over the choice of random coefficients drawn from a finite subset $R \subseteq K$. The proof for the finite-field case is from [Zei24]; the paper adapts it to linear codes over $\mathbb Q$ (Remark 2.16). We won't reproduce the proof — see Zei24 for the original and paper §3.2 for the $\mathbb Q$ adaptation.
+
+**Why this matters operationally.** In the Brakedown / Zip family, the IOPP's per-query soundness error scales as $\beta^t$, where $t$ is the number of columns the verifier opens. To hit $\lambda$ bits of soundness, you need $t \approx \lambda / \log(1/\beta)$ opens. Pushing $\beta$ from $\delta/2$ (unique decoding) up to $\sim (1-\delta)^{1/3}$ (1.5 Johnson) directly reduces $t$ — fewer columns, smaller proofs, less verifier work. This is the "list-decoding regime" win.
+
+The merging of test and evaluation phases is a downstream consequence: MCA's "agreement doesn't leak from combinations" property is exactly what lets a single random-combo step do both proximity testing and tensor-identity evaluation safely.
+
+**A caveat on what the implementation actually does.** The paper is slightly self-contradictory on the benchmark parameters: §2.5 says the Table 4 numbers use **rate $1/8$ at the 1.5 Johnson bound**, while Remark 2.16 footnote 9 says "in our experiments we use a rate of $1/4$ and the Unique Decoding Radius, since in this parameter regime the UDR leads to better performance than the 1.5 Johnson bound." Take the §2.5 statement as the headline (it's the paragraph attached to Table 4) and the footnote as evidence that the MCA-bound vs UDR choice is workload-dependent — the implementation picks whichever wins for the configuration in front of it.
+
+## The Zip+ IOPP, in three layers
+
+The Zip+ construction is layered: a non-projected scalar core, a polynomial-witness wrapper, and a projected-evaluation outer layer. We follow the paper's §2.4 layering — it's also how the implementation is organized.
+
+<img
+  src="/diagrams/zinc-plus-iopp-layers.svg"
+  alt="Three-layer reduction tower of the Zip+ IOPP. Layer 3 starts with the projected constraint ψ̃(W)(z) = ζ over K' and reduces to a non-projected tensor constraint. Layer 2 carries a polynomial witness W̃(z) = a over K[X] with a ∈ K^<d[X] and splits W by X-degree into d parallel scalar IOPPs batched together. Layer 1 carries the scalar witness W̃(z) = ζ over K, dispatched Brakedown-style via a row-combine plus column opens against the underlying linear code (IPRS over Q, or any code over F_q)."
+/>
+
+### Layer 1 — non-projected, scalar witness
+
+Same shape as Zinc Part 2's eval phase. The witness $W \in K^{k_2 \times k_1}$, the interleaved encoding $V \in K^{k_2 \times n}$, the constraint $\widetilde W(z) = \zeta$ for $z = (z_2, z_1) \in K^{\log k_2 + \log k_1}$ and $\zeta \in K$. Build the equality vectors
+
+$$u_2 = (\widetilde{\mathrm{eq}}(z_2, b))_{b \in \{0,1\}^{\log k_2}} \in K^{k_2}, \qquad u_1 = (\widetilde{\mathrm{eq}}(z_1, b))_{b \in \{0,1\}^{\log k_1}} \in K^{k_1}.$$
+
+The MLE-evaluation constraint rewrites as the **tensor constraint**
+
+$$\widetilde W(z) = u_2^T W u_1 = \zeta \quad \text{over } K.$$
+
+Protocol: the prover sends $a \in K^{k_2}$ claimed to equal $W u_1$. The verifier checks $u_2^T a = \zeta$. If that passes, prover and verifier reduce the remaining claim ("$V$ is close to an encoding of some $W$ with $W u_1 = a$") to a single proximity claim via the merged random-combo step — the same combination that tests codeword proximity also computes $W u_1$.
+
+**The $K = \mathbb Q$ adaptations.** When $K = \mathbb Q$, two things change.
+
+*(a) Projected check at the scalar level.* The constraint form becomes $\widetilde{\phi_m(W)}(z) = \zeta$ in $\mathbb F_m$ for a large random prime $m$ — exactly the Zinc-Part-1 random-prime trick, here at the inner-IOPP layer. The prover sends $a \in \mathbb F_m^{k_2}$; the check $u_2^T a = \zeta$ runs $\bmod\, m$. The final proximity claim is *still* taken over $\mathbb Q$ — the random linear combination is analyzed over $\mathbb Q$, which is what requires the MCA-for-$\mathbb Q$ result from Remark 2.16.
+
+*(b) Bit-size enforcement.* Per Remark 2.17, the final move in any Brakedown-style IOPP over $\mathbb Q$ is the prover sending the random linear combination of witness rows, $w^\star$. If the honest prover's witness has bit-size $\leq B_0$, then $w^\star$ (a combination with $\lambda$-bit random coefficients) has bit-size $\leq B_0 + O(\lambda + \log k_2)$, all polynomial in $B_0$ and $\lambda$. The verifier rejects if $w^\star$'s bit-size exceeds the $\text{poly}(B)$ threshold. Soundness against bit-size cheats then reduces to the Zinc-Part-2 lemma chain (Lemmas 2.4, 2.5 of that paper) on random linear combinations of large rationals — random combos of large entries stay large, random combos of fractions rarely collapse to integers.
+
+### Layer 2 — non-projected, polynomial witnesses
+
+Now $W$ and $V$ have entries in $K^{<d}[X]$, and the target $a$ also lives there. Split everything by $X$-degree:
+
+$$W = \sum_{i=0}^{d-1} X^i \cdot W^{(i)}, \qquad V = \sum_{i=0}^{d-1} X^i \cdot V^{(i)}, \qquad a = \sum_{i=0}^{d-1} X^i \cdot \zeta^{(i)}.$$
+
+The polynomial constraint $\widetilde W(z) = a$ decomposes into $d$ independent scalar constraints $\widetilde{W^{(i)}}(z) = \zeta^{(i)}$ over $K$. Each fires a Layer-1 IOPP on $(V^{(i)}, W^{(i)}, \zeta^{(i)})$. Standard random-linear-combination batching collapses the $d$ parallel proximity claims into one.
+
+For commits, this is exactly the **interleaved commitment** from Part 1's add-on path: a polynomial-witness commit is just $d$ scalar-witness commits, batched. When $K = \mathbb F_q$, this is the entire PCS story — any existing $\mathbb F_q$ multilinear PCS, wrapped with the $d$-layer interleaving, handles the Zinc+ add-on regime. No new code, no new lemmas.
+
+### Layer 3 — projected constraints
+
+This is where Zip+ does new work. The PIOR delivers a claim of the form $\widetilde{\psi(W)}(z) = \zeta$ over a finite field $K'$, where $\psi$ is one of the projections from Part 1's §2.2.1 — either $\phi_{q_0}$ (when $K = \mathbb Q$) or $\iota_{\tilde q} \circ$ eval-at-$\alpha$ (when $K = \mathbb F_q$). Reduce to a Layer-2 non-projected claim.
+
+**Easy case: $K = \mathbb F_q$, $\psi$ evaluates at $\alpha \in K$.** The tensor reformulation lifts straight up: $\widetilde{\psi(W)}(z) = u_2^T \psi(W) u_1 = \zeta$. The prover sends $a \in K^{<d}[X]$ claimed equal to $u_2^T W u_1$ over $K[X]$, the verifier checks $\psi(a) = \zeta$, and the remaining proximity-plus-tensor-constraint claim hands off to Layer 2. One non-projected polynomial IOPP, done.
+
+**Hard case: $K = \mathbb Q$, $K' = \mathbb F_{p^\kappa}$ with $\kappa$ large.** This case arises when the inner PIOP runs over a high-extension finite field — e.g., $\mathbb F_{2^{128}}$ for arithmetizations that start over $\mathbb F_2[X]$. The naive lift "evaluate $\widetilde W$ at the lifted query point $z_{\text{lift}} \in (\{0, \ldots, p-1\}^{<\kappa}[X])^\mu$" produces a result whose $X$-degree is $\kappa \mu$ — prohibitive when $\kappa$ is, say, $128$ and $\mu$ is $20$.
+
+The fix: lift only the equality vectors $u_1, u_2$, not the witness. Reduce first to the *tensor* constraint $u_2^T \psi(W) u_1 = \zeta$ over $\mathbb F_q$. Then take a fixed lift of $\psi$ — a section $\{0, \ldots, p-1\}^{<\kappa}[X] \hookleftarrow \mathbb F_q$ — and apply it coefficient-wise to $u_1, u_2$ to get $u_{1, \text{lift}}, u_{2, \text{lift}}$ with polynomial entries of $X$-degree $< \kappa$. The lifted tensor product $u_{2, \text{lift}}^T W u_{1, \text{lift}}$ over $\mathbb Q[X]$ now has $X$-degree $< d + 2\kappa - 2$ — manageable for any reasonable $d$ and $\kappa$, not blown up by $\mu$.
+
+The prover then sends $a \in \mathbb Q^{<d + 2\kappa - 2}[X]$ claimed equal to that lifted tensor product. The verifier checks $\psi(a) = \zeta$ over $\mathbb F_q$. If that passes, the residual claim is "$V$ is close to an encoding of some $W$ with $u_{2, \text{lift}}^T W u_{1, \text{lift}} = a$ over $\mathbb Q[X]$" — almost a Layer-2 claim, except the constraint vectors have polynomial entries of degree $< \kappa$.
+
+**The second-prime detour.** To avoid running $O(\kappa)$ scalar IOPPs to handle the polynomial constraint vectors, Zip+ projects once more. The verifier samples a *fresh* large random prime $m$ and a fresh random $\xi \in \mathbb F_m$. The map $\psi_{m, \xi}: \mathbb Z_{(m)}[X] \to \mathbb F_m$ first localizes coefficients to $\mathbb F_m$, then evaluates at $X = \xi$. Replace the strict constraint
+
+$$u_{2, \text{lift}}^T W u_{1, \text{lift}} = a \qquad \text{over } \mathbb Q[X]$$
+
+with its $\psi_{m, \xi}$-image:
+
+$$\psi_{m, \xi}(u_{2, \text{lift}})^T \phi_m(W) \psi_{m, \xi}(u_{1, \text{lift}}) = \psi_{m, \xi}(a) \qquad \text{over } \mathbb F_m.$$
+
+If the original held strictly, the projected version holds too. If the original failed, Schwartz–Zippel-plus-random-prime gives the standard $O(d / m) + O(\mu / m)$ soundness bound — negligible for $m \approx 2^\lambda$. The honest prover's witness has no entry whose denominator is divisible by $m$ by the same bit-size counting from Part 1, so well-definedness holds for free.
+
+The residual claim "$V$ is close to encoding of some $W$ with $\psi_{m, \xi}(u_{2, \text{lift}})^T \phi_m(W) \psi_{m, \xi}(u_{1, \text{lift}}) = \psi_{m, \xi}(a)$" is now a Layer-2 polynomial-witness tensor constraint over $\mathbb F_m[X]$ (since $\phi_m(W)$ still has polynomial entries in $X$, of degree $< d$) — handed off to the batched scalar IOPPs of Layer 2.
+
+### What the layers buy
+
+The cleanest way to read the layering is **degree on the constraint, not on the witness**. Layer 1 handles scalar constraints with the merged Brakedown core. Layer 2 lifts to polynomial witnesses by paying a factor $d$ in scalar IOPPs (batched). Layer 3 absorbs the projection — easy when $K' = K$, requiring the $\psi_{m, \xi}$ second-prime trick when $K'$ is a high-extension of a different characteristic.
+
+The whole thing composes with the IPRS code as the underlying $\mathbb Q$-linear code (or with any $\mathbb F_q$-linear code in the $\mathbb F_q$-only regime).
+
+## Soft range checks: bit-size at the commitment layer
+
+Part 1's PIOR assumed bit-size-bounded witnesses. Lemma 2.1's random-prime soundness analysis required it. The PCS is what makes that assumption a guarantee.
+
+**Where the check lives.** Per Remark 2.17 of the paper, every Brakedown-style IOPP over $\mathbb Q$ ends with the prover sending the **random linear combination of witness rows**, $w^\star \in \mathbb Q^{k_1}$, which the verifier then encodes and checks against the committed $V$ via column opens. The bit-size check piggy-backs on $w^\star$:
+
+- **Honest case.** Witness entries have bit-size $\leq B_0$. The combination uses $\lambda$-bit random coefficients across $k_2$ rows. Standard arithmetic: $\|w^\star\|_\infty \leq \|W\|_\infty \cdot k_2 \cdot 2^\lambda$, so $w^\star$'s entries have bit-size $\leq B_0 + \log k_2 + \lambda = \text{poly}(B_0, \lambda)$. Verifier checks against this bound.
+- **Cheating case.** If $W$ has entries of bit-size $\geq B$ for some $B > B_0$, the Zinc-Part-2 Lemmas 2.4–2.5 chain (random combinations of large rationals stay large with overwhelming probability) forces $w^\star$ above the threshold too. Verifier rejects.
+
+**The completeness-soundness gap.** Honest provers are guaranteed $\leq B_0$; soundness only catches at $\geq B > B_0$. The slack is real — there's a band in $[B_0, B]$ where the verifier can't distinguish — but it's harmless: the PIOR's Lemma-2.1-style analysis only needed a $\text{poly}(B)$ bound, not a tight $B$. Paper §2.4 footnote 8 makes this call explicitly: "it is enough for our compilation purposes to guarantee bit-size bound below $\text{poly}(B)$, and not exactly below $B$." The constants get absorbed downstream.
+
+**Well-definedness.** Runs the same way as Zinc Part 2's bad-denominator branch. Honest prover's witness has no entry whose denominator is divisible by the random prime $q_0$ — bit-size counting (Lemma 2.1) gives this with overwhelming probability. The oracle returns $\bot$ on ill-defined queries; the verifier rejects on any $\bot$.
+
+The upshot: the commitment scheme enforces $\mathbb Q^{<d, \text{poly}(B)}[X]$ typing. The narrower types — $\mathbb Z^{<d}[X]$, $\{0,1\}^{<w}[X]$, $[0, 2^w)$ — are enforced by **lookup constraints at the PIOP layer**, exactly as in Part 1.
+
+## From IOPP to hash-only SNARK: BCS compilation
+
+Stack so far: UCS arithmetization → three-step PIOR (Part 1) → Zip+ IOPP with IPRS codes (this article). Final arrow: from the interactive IOP to a hash-only non-interactive succinct argument. That's done via the standard **BCS-style compilation** [[BCS16](https://eprint.iacr.org/2016/116)] — Merkle-commit each oracle, answer queries via Merkle paths, Fiat–Shamir the verifier randomness from a transcript hash.
+
+Zinc Part 2 stopped one step earlier. Its analog scheme **iCOS** delivered an *interactive* succinct argument because Zip's soundness analysis was not round-by-round — proving the standard "this scheme survives Fiat-Shamir" lemma required a state-restoration soundness argument that the unique-decoding-regime analysis didn't yield.
+
+**Zip+ proves round-by-round knowledge soundness.** From paper §1.1: "We prove round-by-round knowledge soundness, allowing for Fiat-Shamir compilation." The proof uses a recent definition from [BCFW25] that handles soundness in the list-decoding regime — the same regime that gives the smaller proofs. Past unique decoding, the standard knowledge-soundness extractor (find the unique nearby codeword, decode it) doesn't apply; the BCFW25 framework provides the list-aware extractor.
+
+The result: the Fiat-Shamir transform applies cleanly. The final SNARK is hash-only — no hidden-order groups, no trusted setup, plausibly post-quantum (modulo the standard ROM-vs-QROM caveats for hash-based schemes). Proof size and verifier time match what the IOPP reports, plus Merkle-path overhead.
+
+We won't reproduce the BCS construction here — see BCS16 for the canonical version, and Zinc Part 2's [§Compilation](/writing/zinc-part-2#compilation-the-pipeline) for the iCOS predecessor and the gap that Zip+'s RBR-KS analysis closes.
+
+## What this buys: the benchmark
+
+End-to-end on MacBook Air M4, 100 bits of security, 7 SHA-256 compressions followed by the multi-scalar-multiplication portion of ECDSA verification:
+
+| Component                                | Prover   | Verifier | Proof size |
+| ---------------------------------------- | -------- | -------- | ---------- |
+| Zip+ IOPP — commit                       | 8.4 ms   | —        | —          |
+| Zip+ IOPP — open                         | 4.7 ms   | 4.2 ms   | 0.06 KB    |
+| Zip+ IOPP subtotal                       | 13.1 ms  | 4.2 ms   | 162 KB     |
+| Zinc+ PIOR (ring proj, ideal batch, eval proj) | 5.5 ms   | 0.2 ms   | 9 KB       |
+| Finite-field PIOP (HyperPlonk-like)      | 21.4 ms  | 2.0 ms   | 27 KB      |
+| zstd-3 compression                       | 0.6 ms   | 0.6 ms   | —          |
+| **Total**                                | **40.6 ms** | **7.0 ms** | **198 KB** |
+
+A few things worth pulling out:
+
+- **The PIOR is cheap.** Steps 1–3 from Part 1 take $5.5$ ms — about $14\%$ of prover time. Most of the work is the inner finite-field PIOP ($21.4$ ms) and the Zip+ commit/open ($13.1$ ms).
+- **Proof size is dominated by Zip+** ($162$ KB out of $198$ KB total). The paper notes this is inherent to Brakedown/Ligero-style PCSs; ongoing work on a WHIR-based [[ACFY25b](https://eprint.iacr.org/2024/1586)] replacement is expected to compress this substantially.
+- **The implementation is suboptimal on purpose.** Paper line 1766: it arithmetizes entirely over $\mathbb Z[X]$, not the optimal $\mathbb Z[X] / \mathbb F_2[X] / \mathbb F_q$ mix from §8. So these numbers are pessimistic — multi-domain support is on the roadmap.
+- **Parameters.** IPRS code with rate $1/8$, radix $8$, base field of size $2^{16} + 1$. Random prime $q_0$ is $\sim 192$ bits. Proximity parameter set to the 1.5 Johnson bound. (Paper Remark 2.16 footnote 9 notes that at the alternative rate $1/4$, the UDR empirically outperforms the 1.5 Johnson bound — workload-dependent.)
+
+## What we didn't cover
+
+A few load-bearing pieces deferred for length:
+
+- **Full MCA-to-RBR-KS reduction** (paper §3.2 + Appendix A.2). The list-aware knowledge extractor that BCFW25 provides, and its instantiation for the Zip+ IOPP.
+- **General-radix IPRS encoder and full distance proof** (paper §7). Above we fixed radix-$2$ for the explanation; the implementation uses radix-$8$ for performance.
+- **Full Zip+ IOPP construction with all batching wrappers** (paper §6). The §2.4 sketch we followed gives the conceptual structure; the implementation layers in column batching, query batching, and merged Merkle-path verification.
+- **Qāren** [[SSPP26](https://eprint.iacr.org/2026/347)]. Concurrent work compiling any $\mathbb F_p$ multilinear PCS to a relaxed mod-PCS over $\mathbb Q$. The paper flags it as a possibly-better fit for committing $\{0,1\}^{<32}[X]$ vectors (the SHA-256 use case), but defers the integration.
+- **The $\mathbb F_q$-only "Zinc+ add-on" PCS path.** Covered in Part 1 — any existing $\mathbb F_q$ multilinear PCS wrapped with interleaved commits handles it. No new PCS needed.
+
+## Conclusion
+
+The core ideas, in order:
+
+1. **Zip+ implements the projected-oracle interface** that Part 1's PIOR left as a contract — proximity, bit-size enforcement, and well-definedness under $\psi$, all at the commitment layer.
+2. **Three deltas vs. Zip:** list-decoding regime via MCA (smaller proofs), merged test + evaluation phase (one round less), IPRS codes instead of JEA (MDS distance + FFT encoding + bounded norms simultaneously).
+3. **IPRS — lift the FFT, not the polynomial.** Throwing away the polynomial-evaluation semantics of RS while keeping the FFT algorithmic structure resolves the distance/encoding/norm trilemma that has blocked code-based PCSs over $\mathbb Q$.
+4. **MCA + round-by-round knowledge soundness unblocks Fiat-Shamir.** Zinc Part 2's iCOS stopped at interactive succinctness because the unique-decoding analysis didn't survive state-restoration; Zip+'s RBR-KS proof in the list-decoding regime is what makes BCS compilation kosher.
+5. **Soft range checks fold into the existing random-linear-combo step.** Bit-size enforcement piggy-backs on the prover's final $w^\star$ message; the $B_0$-vs-$B$ completeness-soundness gap is real but absorbed downstream.
+
+The result is the first hash-only SNARK with native integer + bitwise arithmetization, no hidden-order groups, plausibly post-quantum, delivering 7 SHA-256 compressions + ECDSA MSM at $\sim 40$ ms prover / $7$ ms verifier / $198$ KB proof on a laptop. End-to-end, with measured benchmarks.
+
+What's next: IPRS-MCA at the standard Johnson bound (open in the paper, would directly tighten proofs); a WHIR-based replacement for the Brakedown-flavored proof-size term; integration with Qāren for $\{0,1\}^{<32}[X]$ commits.
+
+## References
+
+- **Zinc+: SNARKs for Polynomial Rings.** Alexander Abdugafarov, Albert Garreta, Amit Kumar, Michał Osadnik, Psi Vesely, Ilia Vlasov, Kai Zhe Zheng. Nethermind Research et al., May 2026. [PDF](/zinc+.pdf)
+- **Zinc+ Part 1.** [Walkthrough on this blog.](/writing/zinc-plus-part-1)
+- **Zinc Part 1, Part 2.** [Walkthroughs on this blog.](/writing/zinc-part-1)
+- **Brakedown.** Golovnev, Lee, Setty, Thaler, Wahby. CRYPTO 2023.
+- **Field-Agnostic SNARKs from Expand-Accumulate Codes** ([BFKTWZ24], the source of JEA-style constructions). Block, Fang, Katz, Thaler, Waldner, Zhang. CRYPTO 2024.
+- **Khatam: Reducing the Communication Complexity of Code-Based SNARKs** ([Zei24]). Zeilberger 2024 — MCA / 1.5 Johnson bound for linear codes; generalized to $\mathbb Q$-codes in this paper's §3.2. [ePrint 2024/1843](https://eprint.iacr.org/2024/1843)
+- **Linear-Time Accumulation Schemes** ([BCFW25]). Bünz, Chiesa, Fenzi, Wang. TCC 2025 — provides the round-by-round knowledge soundness framework Zip+ uses in the list-decoding regime.
+- **Interactive Oracle Proofs** ([BCS16]). Ben-Sasson, Chiesa, Spooner. TCC 2016-B — the BCS-style compilation from IOPs to hash-only succinct arguments.
+- **WHIR** ([ACFY25b]). Arnon, Chiesa, Fenzi, Yogev 2025 — the proof-size successor that ongoing Zinc+ work is targeting.
+- **Relaxed Modular PCS** ([SSPP26]). Shirzad, Sridhar, Papadopoulos, Papamanthou 2026 — concurrent work compiling any $\mathbb F_p$ multilinear PCS to a relaxed mod-PCS over $\mathbb Q$. [ePrint 2026/347](https://eprint.iacr.org/2026/347)
+- **Binius.** Diamond, Posen. 2024–2025 — binary-field SNARKs, the comparison point for bitwise arithmetization.
