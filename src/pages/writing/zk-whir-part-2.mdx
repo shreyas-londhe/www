@@ -1,0 +1,242 @@
+---
+layout: ../../components/blog-post.astro
+title: "Zero-Knowledge WHIR II: Code-Switching in the Dark"
+description: "Part 2 of 2 on Chiesa–Fenzi–Weissenberg's HVZK IOPP. Zero-knowledge code-switching via private zero-evaders, and assembly into HVZK WHIR/Ligerito at 1+o(1) overhead."
+pubDate: "2026-05-30"
+tags: ["zero-knowledge", "snarks", "iops", "whir"]
+---
+
+## Where Part 1 left us
+
+[Part 1](/writing/zk-whir-part-1) built the foundations of an HVZK IOPP for constrained interleaved codes:
+
+- **Zero-knowledge encodings.** Randomized encodings $\mathsf{Enc}_{\mathcal C} \colon \mathbb F^\ell \times \mathbb F^r \to \Sigma^m$ where any $\leq t$ coordinates of the codeword can be simulated from positions alone.
+- **The committed sumcheck relation $\mathcal R_{\mathcal C, \mathcal C_{\mathsf{zk}}, \mathsf{sl}}$.** Succinct linear forms to kill the verifier's $\Omega(\ell)$ cost, plus small mask oracles folded into a joint constraint to hide the target $\mu$.
+- **Composable HVZK for IORs.** The standard HVZK definition breaks under composition (Part 1's $\mathsf{IOR}_1 \circ \mathsf{IOR}_2$ counterexample). Fix: a distinguisher class $\mathcal D$ that the simulator must additionally handle, and a composition theorem that chains errors $\zeta_1 + \zeta_2$ across the seam.
+- **HVZK sumcheck reduction.** Reduces a $2^k$-interleaved code to its base code via small per-round masks (not a full $2\times$ mask), with mask oracles carried forward through the joint constraint. Drops problem size by a factor of $2^k$ at sublinear masking cost.
+
+We can now test the _interleaving_ of any zero-knowledge code in zero knowledge — by reducing to the base code. But the base code is still big. To get a polylog verifier we need to recursively shrink the code, and the move that does that is **code-switching**: an IOR from a test for code $\mathcal C$ to a test for some smaller code $\mathcal C'$.
+
+The non-zero-knowledge version is well-trodden ([RR20]; [BCFW25]; WHIR's recursion shape). The zero-knowledge version breaks in two distinct places. This part fixes both, assembles the HVZK WHIR/Ligerito corollary, and tackles the R1CS reduction.
+
+## Code-switching without zero-knowledge
+
+Code-switching follows a clean template. The verifier has an oracle $f$ that — honestly — equals $\mathcal C(\boldsymbol m)$ for some message $\boldsymbol m$ satisfying a predicate $\Phi$. The prover wants to convince the verifier of this fact using a _smaller_ proximity test.
+
+1. **Prover sends $g$.** A new oracle $g \in (\Sigma')^{m'}$. In the honest case, $g = \mathcal C'(\boldsymbol m)$ — the _same_ message encoded under the new, smaller code $\mathcal C'$.
+2. **Verifier spot-queries $f$.** Sample $x_1, \dots, x_t \in [m]$, query $f(x_1), \dots, f(x_t)$.
+3. **Run a proximity protocol** for the new claim "$g$ encodes some $\boldsymbol m$ such that $\Phi(\boldsymbol m) = 1$ and $\mathcal C(\boldsymbol m)[x_i] = f(x_i)$ for every $i$."
+
+The added clauses $\mathcal C(\boldsymbol m)[x_i] = f(x_i)$ are the **consistency check**: they tie the new oracle's message to the old oracle's message. Without them, the prover could swap $\boldsymbol m$ at the switch.
+
+This template is everywhere — [RR20], [RR22], [BCFW25], the [BMMS25] family of FICS/FACS protocols, WHIR's recursion. It has _not_ been applied to zero-knowledge codes outside [RW24], whose construction leans on specific properties of zero-knowledge tensor codes. We need a code-agnostic ZK version.
+
+## Why ZK encodings break the template
+
+The first break: the consistency check assumes the codeword is a function of the message alone. With a ZK encoding it isn't.
+
+Concretely, $f = \mathsf{Enc}_{\mathcal C}(\boldsymbol m, \boldsymbol r)$ depends on _both_ the message and the randomness. The consistency check $\mathcal C(\boldsymbol m)[x_i] = f(x_i)$ doesn't even type-check anymore — you need $\boldsymbol r$ to predict $f$.
+
+The obvious fix: have $g$ encode both the message and the randomness under $\mathcal C'$. That works, but it requires padding $g$'s message space, which means $g$ is twice the size, every subsequent sumcheck operates on a $2\times$-blown object, and we're back to $\geq 2\times$ overhead. Dead.
+
+The actual fix reuses the committed sumcheck relation. Introduce an _additional mask_ $s = \mathsf{Enc}_{\mathcal C_{\mathsf{zk}}}(\boldsymbol r, \boldsymbol r'')$ encoding the randomness $\boldsymbol r$ under the ZK mask code $\mathcal C_{\mathsf{zk}}$. Now write the per-symbol claim by splitting $\mathsf{Enc}_{\mathcal C}$'s generator matrix into a message part and a randomness part: $G_{\mathcal C} = [G_{\mathcal C}^{\mathrm{msg}} \mid G_{\mathcal C}^{\mathrm{rnd}}]$ where $G_{\mathcal C}^{\mathrm{msg}}$ acts on the message and $G_{\mathcal C}^{\mathrm{rnd}}$ acts on the randomness. Then
+
+$$
+f(x) \;=\; \mathsf{Enc}_{\mathcal C}(\boldsymbol m, \boldsymbol r)[x] \;=\; \langle \boldsymbol m,\, G_{\mathcal C}^{\mathrm{msg}}[x] \rangle + \langle \boldsymbol r,\, G_{\mathcal C}^{\mathrm{rnd}}[x] \rangle,
+$$
+
+which is a linear constraint on $(\boldsymbol m, \boldsymbol r)$. The first piece accumulates into the existing main-oracle constraint via the succinct linear form $\mathsf{sl}'$; the second piece accumulates as a constraint on the mask $s$. Both go into the joint constraint of the next committed sumcheck relation. No padding, no $2\times$.
+
+That handles the randomness break. But the bigger break is structural: the WHIR-style recursion uses **out-of-domain sampling** in the list-decoding regime, and OOD's whole _job_ is to leak information.
+
+## OOD sampling and the second tension
+
+Quick recap (see the [WHIR post](/writing/whir) for the proper treatment). In the list-decoding regime — where the verifier picks a proximity parameter $\delta$ larger than the unique-decoding radius — multiple codewords in $\Lambda(\mathcal C, f, \delta)$ can be close to a malicious oracle $f$. The verifier needs a way to force the prover to commit to _one_ codeword, not a list.
+
+OOD sampling does this by an additional constraint. After the prover sends $f$, the verifier samples randomness $\rho \leftarrow D_{\mathsf{ze}}$, the prover sends a vector $\boldsymbol y := \mathsf{ze}(\rho) \cdot \boldsymbol f$ for a fixed function $\mathsf{ze} \colon D_{\mathsf{ze}} \to \mathbb F^{t_{\mathsf{ood}} \times \ell}$, and the verifier subsequently checks $\mathsf{ze}(\rho) \cdot \mathcal C^{-1}(f) = \boldsymbol y$. For appropriate $\mathsf{ze}$, with high probability over $\rho$ at most one codeword in $\Lambda(\mathcal C, f, \delta)$ satisfies this constraint. Once a single codeword is pinned, list-decoding-regime soundness becomes manageable.
+
+Now look at $\boldsymbol y$. It's a linear function of the witness message $\boldsymbol m$ with $t_{\mathsf{ood}} \cdot \ell$ public coefficients. The prover sends it _in the clear_. **It leaks information about $\boldsymbol m$, hence about the witness.**
+
+And the leak is _inherent_. OOD is designed to uniquely identify the codeword (i.e., the witness). Zero-knowledge forbids revealing the witness. The two cannot literally coexist — you have to weaken one.
+
+The paper weakens neither. It restructures OOD so the leak hits randomness instead of the witness.
+
+## Zero-evaders and private zero-evaders
+
+The revised OOD sample is
+
+$$
+\boldsymbol y \;:=\; \mathsf{ze}(\rho) \cdot \begin{bmatrix} \boldsymbol m \\ \boldsymbol r \end{bmatrix},
+$$
+
+with the difference being that the linear function $\mathsf{ze}$ now mixes both the message and _freshly sampled_ randomness $\boldsymbol r \leftarrow \mathbb F^r$. The function $\mathsf{ze}$ is asked to satisfy two conditions:
+
+1. **It's still a good OOD sample.** Equivalently, $\mathsf{ze}$ is a **zero-evader** [BCFW25]: for every nonzero vector $\boldsymbol v$,
+   $$\Pr_{\rho \leftarrow D_{\mathsf{ze}}}\big[\mathsf{ze}(\rho) \cdot \boldsymbol v = \boldsymbol 0\big] \leq \varepsilon_{\mathsf{zero}}.$$
+   I.e. the matrix $\mathsf{ze}(\rho)$ is, in expectation, full-rank enough to detect any nonzero input difference. This is what enables list-decoding-regime soundness.
+2. **It leaks no information about $\boldsymbol m$.** Formalized: $\mathsf{ze}$ is an **$(r, \zeta_{\mathsf{ze}})$-private zero-evader** — here $r \in \mathbb N$ is the number of fresh randomness coordinates absorbed into the OOD sample — if $(\boldsymbol y, \rho)$ can be efficiently simulated, with statistical error at most $\zeta_{\mathsf{ze}}$, _without_ knowing $\boldsymbol m$.
+
+The two conditions look like they should pull in opposite directions: condition (1) wants $\mathsf{ze}(\rho)$ to depend richly on the input; condition (2) wants $\boldsymbol y$ to look uniform regardless of $\boldsymbol m$.
+
+> **Lemma (informal, Lemma 2.13).** They don't. Any zero-evader $\mathsf{ze}$ with error $\varepsilon_{\mathsf{zero}}$ can be _extended_ — by absorbing $r$ extra randomness columns for any $r \in \mathbb N$ — to an $(r, 0)$-private zero-evader with approximately the same error. **Perfect privacy is achievable**, and private zero-evaders are plentiful.
+
+Intuitively: extra randomness in $\boldsymbol r$ gives the message-part of $\boldsymbol y$ a freshly random mask that doesn't affect zero-evasion. The OOD claim still pins a single message, but the corresponding $\boldsymbol y$ is uniform over $\mathbb F^{t_{\mathsf{ood}}}$ from the verifier's perspective.
+
+<img src="/diagrams/zk-whir-ood-vs-private-ood.svg" alt="Side-by-side comparison: left, non-ZK OOD computes y = ze(ρ) · m and ships y in the clear, leaking a linear function of the witness message; right, private-zero-evader OOD computes y = ze(ρ) · (m, r) by mixing m with freshly sampled randomness r, so y is uniform from the verifier's view while ze still pins a unique message." />
+
+### The crux: why the unique codeword still gets pinned
+
+Here's the subtlety that does the actual work — and the part the paper spends real care on.
+
+In the non-ZK OOD lemma of [BCFW25], the consistency $\mathsf{ze}(\rho) \cdot \mathcal C^{-1}(f) = \boldsymbol y$ pins a _unique codeword_ near $f$. But in the ZK setting, the encoding has redundancy: many distinct $(\boldsymbol m_i, \boldsymbol r_i)$ pairs encode to nearby codewords. We can no longer hope to pin a unique pair.
+
+The paper's generalization of the lemma (Lemma 2.14) gives up that hope cleanly:
+
+> **Lemma (informal, Lemma 2.14).** Allow _many_ pairs $(f_1, s_1), (f_2, s_2)$ near the original codewords to satisfy the OOD constraint $\mathsf{ze}(\rho) \cdot (\boldsymbol f_i, \boldsymbol s_i)^\top = \mathsf{ze}(\rho) \cdot (\boldsymbol f_j, \boldsymbol s_j)^\top$. But enforce that the _message parts_ must be equal: $\boldsymbol f_i = \boldsymbol f_j$ (and $\boldsymbol s_i = \boldsymbol s_j$) except with probability $|\Lambda(\mathcal C, \delta)|^2 \cdot |\Lambda(\mathcal C_{\mathsf{zk}}, \delta_{\mathsf{zk}})|^2 \cdot \varepsilon_{\mathsf{zero}}$.
+
+This is the moment ZK and list-decoding stop being in tension. In the non-ZK world we needed _the codeword_ to be unique to control soundness. In the ZK world, the codeword can't be unique (privacy demands it isn't), but its _message_ can be — and the message is what soundness actually cares about. The OOD constraint, restated against messages instead of codewords, lets us keep list-decoding-regime efficiency while making the actual encoded oracle a uniformly random sample from a large set.
+
+**The proof is straightforward once you stare at it.** Fix distinct $(\boldsymbol f_1, \boldsymbol s_1), (\boldsymbol f_2, \boldsymbol s_2)$. If they agree as messages we're done. Otherwise the difference $(\boldsymbol f_1 - \boldsymbol f_2, \boldsymbol s_1 - \boldsymbol s_2)$ is a nonzero vector, and zero-evasion bounds the probability that $\mathsf{ze}(\rho)$ kills it by $\varepsilon_{\mathsf{zero}}$. Union-bound over the pairs in $\Lambda(\mathcal C, \delta) \times \Lambda(\mathcal C_{\mathsf{zk}}, \delta_{\mathsf{zk}})$.
+
+<img src="/diagrams/zk-whir-lemma-2-14-equivalence.svg" alt="Equivalence-class diagram for Lemma 2.14: the product list Λ(C,δ) × Λ(C_zk, δ_zk) of nearby (codeword, mask) pairs is partitioned into colored classes by the underlying message; many distinct (f_i, s_i) pairs may satisfy the OOD constraint, but the lemma forces every satisfying pair into one message class, so soundness still pins the message even though the codeword is no longer unique." />
+
+There's one last knot. The fresh randomness $\boldsymbol r$ must be _included_ in the code-switch claim too — otherwise the next round won't know about it. Padding $\boldsymbol r$ into $\mathcal C'$ would reintroduce the $2\times$ overhead we were just trying to avoid. The fix: a **joint OOD sample** of both $g$ and the mask $s$, treating the pair as one object. The committed sumcheck relation, with its accumulating joint constraint, is exactly the right vehicle for this — and the entire reason it was designed the way it was.
+
+## The code-switch construction
+
+Putting all four pieces together — ZK-encoding-aware consistency, the joint OOD sample, the private zero-evader, and the committed sumcheck relation — gives the construction. At a high level it does the following.
+
+1. **Prover sends $g$ and $s$.** Honestly: $g := \mathsf{Enc}_{\mathcal C'}(\boldsymbol m, \boldsymbol r')$ — the same message under the smaller code, with fresh randomness $\boldsymbol r' \leftarrow \mathbb F^{r'}$. And $s := \mathsf{Enc}_{\mathcal C_{\mathsf{zk}}}((\boldsymbol s, \boldsymbol r), \boldsymbol r'')$ — a mask encoding additional fresh randomness $\boldsymbol s \in \mathbb F^{\ell_{\mathsf{zk}} - r}$ concatenated with the original randomness $\boldsymbol r$.
+2. **Verifier sends OOD randomness $\rho \leftarrow D_{\mathsf{ze}}$.**
+3. **Prover replies with $\boldsymbol y \in \mathbb F^{t_{\mathsf{ood}}}$.** Honestly: $\boldsymbol y := \mathsf{ze}(\rho) \cdot (\boldsymbol m, \boldsymbol r, \boldsymbol s)^\top$ — the joint OOD sample over message and both pieces of mask.
+4. **Verifier sends in-domain queries.** $x_1, \dots, x_t \leftarrow [m]$ for consistency, plus a batching scalar $\boldsymbol \varepsilon$.
+5. **Verifier reads $f(x_1), \dots, f(x_t)$** and combines everything into a new target
+
+$$
+\mu' \;:=\; \mu + \sum_i \varepsilon_i \cdot y_i + \sum_{i, l} \varepsilon_{\dots} \cdot f(x_i)_l,
+$$
+
+producing a fresh committed-sumcheck instance over $(\mathcal C', \mathcal C_{\mathsf{zk}}, \mathsf{sl}')$ whose joint constraint pulls in:
+
+- the original main-oracle constraint, restated as a succinct linear form $\mathsf{sl}'$ evaluating to $\mathsf{Fold}(\mathsf{sl}(\mathsf{st}), \boldsymbol \gamma)$ at the right state,
+- the original mask-oracle constraints $\langle \boldsymbol \xi_i, \boldsymbol u_i \rangle$,
+- the joint OOD constraint $\sum_i \varepsilon_i \cdot \langle (\boldsymbol m, \boldsymbol r, \boldsymbol s), \mathsf{ze}_i(\rho) \rangle$,
+- the consistency constraints $\sum_{i, l} \varepsilon_{\dots} \cdot \langle (\boldsymbol m, \boldsymbol r), G_{\mathcal C}[x_{i, l}] \rangle$ derived from the generator-matrix split.
+
+All four are linear in the underlying messages, so they pack into one joint constraint.
+
+<img src="/diagrams/zk-whir-code-switch-flow.svg" alt="Message-flow diagram for the code-switch IOR: prover sends g = Enc_{C'}(m, r') and mask s = Enc_{C_zk}((s, r), r''); verifier sends OOD randomness ρ; prover replies with joint OOD answer y = ze(ρ) · (m, r, s); verifier issues in-domain consistency queries x_1,…,x_t and batching scalars ε, reads f(x_i), and assembles μ' that bundles the original main-oracle constraint, the mask-oracle constraints, the joint OOD constraint, and the consistency constraints into the next committed sumcheck instance over (C', C_zk, sl')." />
+
+**A counterintuitive efficiency property:** the prover and verifier time of this code-switch are _independent of the starting code $\mathcal C$_. The dominant cost is the encoding under $\mathcal C'$ (the new, smaller code) and the verifier's computation of $\mu'$. The starting code's structure pushes through into the next relation's succinct linear form $\mathsf{sl}'$ — captured by a quantity $T_{\mathcal C}$ the paper calls the **code-switching friendliness** of $\mathcal C$ — but doesn't show up in this protocol's local cost. People reach for "the slow code makes the switch slow"; that's not what happens.
+
+## From building blocks to the theorems
+
+Compose the HVZK sumcheck reduction (Part 1) with the code-switch IOR above, all of it under the composable HVZK-for-IORs framework, and three named theorems fall out. The composition is sound exactly because each IOR explicitly handles the "future distinguisher" — namely, the simulator of whatever IOR consumes its output — so HVZK chains end-to-end.
+
+### Theorem 1 — sublinear HVZK IOPP
+
+Compose two things: the HVZK sumcheck reduction (Part 1's §6), reducing $\mathcal R_{\mathcal C^{\equiv 2^k}, \mathcal C_{\mathsf{zk}}, \mathsf{sl}}$ to $\mathcal R_{\mathcal C, \mathcal C_{\mathsf{zk}}, \mathsf{sl}'}$; followed by a non-succinct base-case HVZK IOPP (a generalization of the simple $2\times$-overhead protocol from §2.2 of the paper, applied at a much smaller scale).
+
+The **sublinear regime** comes from picking $2^k \approx m_{\mathcal C}$ — i.e. setting the interleaving factor to roughly the codeword block length. Then the encoded message in $\mathcal C^{\equiv 2^k}$ has size $\ell = 2^k \cdot \ell'$ with $\ell' \approx \sqrt{\ell}$, the post-reduction instance is $\sqrt{\ell}$-sized, and the base-case IOPP (which _does_ pay $2\times$ overhead) runs on a $\sqrt{N}$-size sub-instance. Total proof length: $\approx O(\sqrt{N})$ alphabet symbols. Verifier time: sublinear. Overhead vs the non-private IOPP: $o(1)$ — because the $2\times$ from the base case is amortized over a $\sqrt{N}$-size piece of the original $N$-size problem.
+
+The full mask in the base case is _affordable only because_ it runs on the small piece. That asymmetry is how this paper buys sublinear masking globally.
+
+### Theorem 2 — HVZK code-switching
+
+The full reduction from $\mathcal R_{\mathcal C_1^{\equiv 2^k}, \mathcal C_{\mathsf{zk}}, \mathsf{sl}_1}$ to $\mathcal R_{\mathcal C_2, \mathcal C_{\mathsf{zk}}, \mathsf{sl}_2}$, for _arbitrary_ codes $\mathcal C_1, \mathcal C_2$ that can themselves be interleaved. Composition: run the HVZK sumcheck reduction first (drops interleaving), then run the code-switch IOR (drops to $\mathcal C_2$). HVZK with respect to a bounded distinguisher class; RBR knowledge soundness with error $\leq 2^{-\lambda}$ at suitable field size.
+
+This is the engine of the polylog-verifier theorem.
+
+### Theorem 4 — polylogarithmic HVZK verifier
+
+Iterate Theorem 2 along a chain of codes $\mathcal C_1, \mathcal C_2, \dots, \mathcal C_n$, picked so that the $2^k$-interleaving of $\mathcal C_{i+1}$ has the same message size as $\mathcal C_i$ (non-interleaved). Each application of Theorem 2 reduces the problem size by a factor of $2^k$; after $n$ steps the problem is small enough to finish with a small variant of the §2.2 base case. Theorem 4 is parametrized over an arbitrary chain length; specific instantiations (next subsection) pin $n$.
+
+This is the WHIR/Ligerito recursion shape — same idea, ZK-augmented. (See the [WHIR post](/writing/whir) for the non-ZK version of this recursion.)
+
+### Corollary 3 — HVZK Reed–Solomon ⇒ HVZK WHIR/Ligerito
+
+Instantiate Theorem 4's chain with Reed–Solomon codes:
+
+- $k := O(\log \log \ell)$ (folding factor per step).
+- Each $\mathcal C_i$ is Reed–Solomon over an evaluation domain of size $\approx 2^{-i} m$.
+- $\mathcal C_{\mathsf{zk}}$ instantiated with Reed–Solomon at rate $1/\log \lambda$, mask size $\widetilde O(\lambda)$.
+
+This is the parameter regime of WHIR ([ACFY25]) and Ligerito ([NA25]), with ZK encodings substituted for the plain encodings throughout. The result:
+
+- **$O(m) + \widetilde O(\lambda)$** alphabet symbols sent by the prover; verifier makes $O(\lambda)$ queries.
+- **RBR knowledge soundness error $\leq 2^{-\lambda}$.**
+- **Perfect honest-verifier zero-knowledge** ($\zeta = 0$, thanks to RS having perfect ZK encodings with appended randomness).
+- Prover time and verifier time match the non-private WHIR/Ligerito up to $o(1)$.
+
+**This is the headline.** Theorem 2 plus the building blocks above _directly yield an HVZK variant of WHIR and Ligerito_ — a drop-in zero-knowledge replacement for the code-agnostic IOP family at $1 + o(1)$ overhead, in the list-decoding regime, with negligible RBR soundness error. The first such result.
+
+### Comparison
+
+| Protocol | Overhead | Soundness regime | Code family | Verifier |
+| --- | --- | --- | --- | --- |
+| [BCL22] | $O(1)$ | Unique decoding | Any ZK code (tensor-style) | Polylog |
+| [RW24] | $1 + o(1)$ | Constant error only | ZK tensor codes (concrete: RS or tensor) | Polylog |
+| Naive ZK WHIR / Ligero-style | $\geq 2\times$ | List decoding | Reed–Solomon only | Sublinear / polylog |
+| **HVZK WHIR (this paper)** | $\mathbf{1 + o(1)}$ | **List decoding** | **Any $\mathbb F$-additive ZK code** | **Polylog** |
+
+The two rows that previously each owned one of these properties no longer dominate. This work is the first to put all four boxes ticked at once.
+
+## R1CS reduction with sublinear masking
+
+The IOPP above tests proximity to constrained interleaved codes. To turn it into an end-to-end HVZK argument for NP, you reduce R1CS to that proximity test. The paper does this with $1 + o(1)$ overhead by reusing the same masking idea.
+
+Backbone: an interleaved variant of [ACFY25]'s $\Sigma$-IOP for R1CS. Standard R1CS-to-sumcheck-to-codeword pipeline, but with two types of sublinear masks plugged in:
+
+- **R1CS witness masks.** Protect the matrix-vector products $A \cdot z$, $B \cdot z$, $C \cdot z$ from leaking. [BCL22] handles this by padding the R1CS instance with full-size random witness — $O(1)$ overhead. This paper uses sublinear masks instead — $o(1)$.
+- **Sumcheck masks.** Same as Part 1's §6 — small per-round masks accumulated into the joint constraint.
+
+Both mask types are syntactically identical from the relation's perspective — they propagate into an instance of $\mathcal R_{\mathcal C, \mathcal C_{\mathsf{zk}}, \mathsf{sl}}$ which our protocols can test in zero-knowledge end-to-end. Compose with Theorem 1 or Theorem 4 and you get an HVZK IOP for NP with linear-time prover, list-decoding soundness, and $o(1)$ overhead relative to the witness size — strictly improving on [BCL22]'s constant-overhead linear-prover protocol.
+
+One honest caveat: the verifier here is _non-succinct_ on R1CS-side cost, because this paper deliberately does not employ holographic preprocessing (the way [BCL22] and [RW24] do). The IOPP itself remains polylog-verifier.
+
+If you want background on the R1CS-to-sumcheck step, [Spartan](/writing/spartan-protocol) and [SPARK](/writing/spark) cover it.
+
+## What we didn't cover
+
+A few honest cuts.
+
+**High-distance codes from dispersers (Section 12 of the paper).** The protocols here are code-agnostic, so you can buy more distance via the ABNNR construction [ABNNR92] — distance amplification through bipartite-disperser graphs. Plugged into Reed–Solomon, this gives **amplified Reed–Solomon** (ARS): RS at a low-cost base distance, then distance-boosted by gathering disperser neighbors. ARS shaves encoding time in the regime where plain RS pays $O(\ell/\gamma \cdot \log(\ell/\gamma))$ for FFT-based evaluation, replacing it with $O(\ell/\gamma + \ell \log \ell)$. Cost: alphabet inflates by a factor of $d = O(1/\gamma)$, so spot-checks cost more bytes per opening. Under reasonable parameters the paper reports a ≈ 30% argument-size win. Orthogonal to the ZK story and worth a separate read.
+
+**Round-by-round knowledge soundness proofs.** We stated the errors qualitatively but skipped the full mutual-correlated-agreement accounting (the paper's §6 and §9). [WHIR](/writing/whir) treats MCA and list-decoding-regime soundness analysis for the non-ZK case; the ZK accounting is structurally similar but adds extra terms for the mask oracles.
+
+**Memory-efficient streaming prover.** The paper notes that Theorem 1 is plausibly amenable to space-efficient streaming proving (à la [BBHV22], [CTY11]) — the encoding of $\mathcal C^{\equiv K}$ can be done in space proportional to a single base encoding, and the sumcheck can stream too. Not pursued in the paper but flagged as future work.
+
+**Malicious-verifier ZK.** Out of scope. Fiat–Shamir turns HVZK into malicious-verifier ZK for free in the non-interactive setting, which is what all deployed hash-based SNARKs care about.
+
+## Conclusion
+
+The construction lands on five interlocking moves:
+
+1. **The committed sumcheck relation** — succinct linear forms plus mask oracles folded into a joint constraint, set up so the protocol can carry mask state through composition.
+2. **Composable HVZK for IORs** — the distinguisher class $\mathcal D$, the composition theorem, and the discipline of making "future queries" explicit so naive composition stops shipping the witness.
+3. **HVZK sumcheck via interleaved folding** — small per-round masks, encode-then-fold = fold-then-encode, and correlated queries over the bigger alphabet to keep list-decoding-regime soundness affordable.
+4. **Private zero-evaders for ZK-compatible OOD** — randomized OOD samples that still pin a unique message while looking uniform to the verifier, plus the joint OOD sample over the message and an extra mask piece.
+5. **Code-agnostic assembly** — Theorems 1/2/4 plus the RS instantiation give the first HVZK variant of WHIR and Ligerito.
+
+The practical upshot is concrete. Anonymous-credential stacks like [Fs24], built on the sublinear hash-based zkSNARK in [AHIV17], pay $\geq 2\times$ overhead today because the underlying IOP is private but old. The corresponding _non-private_ IOPs are no longer state of the art. This work gives a drop-in path: swap the old private IOP for an HVZK WHIR/Ligerito built from the protocols above, eat $1 + o(1)$ overhead instead of $\geq 2\times$, and the effect compounds because we're measuring against the modern non-private state of the art rather than the 2017 baseline.
+
+The longer-term effect is structural. The code-agnostic IOP family was the wrong place to look for ZK because the existing zero-knowledge moves were tied to polynomial codes. This paper unties them. Once the framework is in place — ZK encodings, composable HVZK-for-IORs, sublinear masking, private OOD — the next ZK variant of the next code-agnostic IOP is a much shorter walk.
+
+## References
+
+- **This paper** — Chiesa, A., Fenzi, G., & Weissenberg, G. (Feb 2026). _Zero-Knowledge IOPPs for Constrained Interleaved Codes._
+- **WHIR** — Arnon, G., Chiesa, A., Fenzi, G., & Yogev, E. (2025). _WHIR: Reed–Solomon Proximity Testing with Super-Fast Verification._ EUROCRYPT '25.
+- **Ligerito** — Novakovic, A., & Angeris, G. (2025). _Ligerito: A Small and Concretely Fast Polynomial Commitment Scheme._ [eprint 2025/1187](https://eprint.iacr.org/2025/1187)
+- **BCFW25** — Bünz, B., Chiesa, A., Fenzi, G., & Wang, W. (2025). _Linear-Time Accumulation Schemes._ TCC '25.
+- **BCL22** — Bootle, J., Chiesa, A., & Liu, S. (2022). _Zero-Knowledge IOPs with Linear-Time Prover and Polylogarithmic-Time Verifier._ EUROCRYPT '22.
+- **RW24** — Ron-Zewi, N., & Weiss, M. (2024). _Zero-knowledge IOPs Approaching Witness Length._ CRYPTO '24.
+- **RR20** — Ron-Zewi, N., & Rothblum, R. (2020). _Local Proofs Approaching the Witness Length._ FOCS '20.
+- **RR22** — Ron-Zewi, N., & Rothblum, R.D. (2022). _Proving as Fast as Computing: Succinct Arguments with Constant Prover Overhead._ STOC '22.
+- **BMMS25** — Baweja, A., Mishra, P., Mopuri, T., & Shtepel, M. (2025). _FICS and FACS: Fast IOPPs and Accumulation via Code-Switching._ [eprint 2025/737](https://eprint.iacr.org/2025/737)
+- **ABNNR92** — Alon, N., Bruck, J., Naor, J., Naor, M., & Roth, R.M. (1992). _Construction of asymptotically good low-rate error-correcting codes through pseudo-random graphs._ IEEE TIT 38(2).
+- **AHIV17 (Ligero)** — Ames, S., Hazay, C., Ishai, Y., & Venkitasubramaniam, M. (2017). _Ligero: Lightweight Sublinear Arguments Without a Trusted Setup._ CCS '17.
+- **Fs24** — Frigo, M., & Shelat, A. (2024). _Anonymous credentials from ECDSA._ [eprint 2024/2010](https://eprint.iacr.org/2024/2010)
+- **BBHV22** — Bangalore, L., Bhadauria, R., Hazay, C., & Venkitasubramaniam, M. (2022). _On Black-Box Constructions of Time and Space Efficient Sublinear Arguments from Symmetric-Key Primitives._ TCC '22.
+- **CTY11** — Cormode, G., Thaler, J., & Yi, K. (2011). _Verifying computations with streaming interactive proofs._ VLDB.
+- **ACFY25** — Arnon, G., Chiesa, A., Fenzi, G., & Yogev, E. (2025). _WHIR: Reed–Solomon Proximity Testing with Super-Fast Verification._ EUROCRYPT '25.
+- **Companion blogs.** [WHIR](/writing/whir), [TensorSwitch I](/writing/tensorswitch-part-1), [TensorSwitch II](/writing/tensorswitch-part-2), [Spartan](/writing/spartan-protocol), [SPARK](/writing/spark), [Part 1 of this series](/writing/zk-whir-part-1).

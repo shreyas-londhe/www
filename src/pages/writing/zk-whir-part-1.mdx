@@ -1,0 +1,380 @@
+---
+layout: ../../components/blog-post.astro
+title: "Zero-Knowledge WHIR I: Why Proximity Testing Leaks, and the Sumcheck That Doesn't"
+description: "Part 1 of a walkthrough of Chiesa–Fenzi–Weissenberg's HVZK IOPP for constrained interleaved codes — the zero-knowledge upgrade to WHIR-style proximity testing at 1+o(1) overhead."
+pubDate: "2026-05-30"
+tags: ["zero-knowledge", "snarks", "iops", "whir"]
+---
+
+## What problem are we solving?
+
+If you've followed the code-agnostic IOP line — [WHIR](/writing/whir), [Ligerito](https://eprint.iacr.org/2025/1187), the Blaze family — you've gotten fast, succinct, post-quantum proximity testing for "constrained interleaved linear codes." What you have _not_ gotten is **privacy**.
+
+The proximity test reveals query answers on a codeword $f$, and $f$ encodes the witness. Strip the rest of the protocol away and the leak is right there in the IOPP: WHIR is not zero-knowledge, and neither is anything else in this family. For most deployed SNARKs that doesn't matter — you wrap your prover in Fiat–Shamir, you don't care that the verifier sees the witness because there is no verifier. But the moment you build something where there _is_ a verifier — anonymous credentials, identity, age assurance — you need a zero-knowledge proof. The honest-verifier flavor is enough; the malicious-verifier flavor follows from Fiat–Shamir for free.
+
+The state of the art on the zero-knowledge side has been bleak:
+
+- **Concretely-efficient ZK IOPs.** Exist, but pay $\geq 2\times$ overhead in prover and verifier time, _and_ are tied to specific polynomial codes — Reed–Solomon, mostly.
+- **[BCL22]** — a tensor-code-based ZK IOP that works for any zero-knowledge code, but $\geq 2\times$ overhead and leans on heavy PCP machinery, so not concretely efficient.
+- **[RW24]** — pushes the overhead down to $1 + o(1)$ relative to witness size, but only targets _constant_ soundness error.
+
+None of the state-of-the-art code-agnostic IOPs provide zero-knowledge. That is the gap.
+
+[**Chiesa, Fenzi, and Weissenberg (Feb 2026)**](https://eprint.iacr.org/) close it. They present an honest-verifier zero-knowledge IOPP for constrained interleaved linear codes that:
+
+- Works for **any** $\mathbb F$-additive code with a zero-knowledge encoding — fully code-agnostic.
+- Costs **$1 + o(1)$** in proof length and prover/verifier time relative to the non-private state of the art.
+- Achieves **round-by-round knowledge soundness** with a straightline extractor and negligible error.
+- Plugs into the WHIR/Ligerito recursion shape directly: Theorem 2 of the paper, together with the building blocks we're about to develop, **literally yields an HVZK variant of WHIR and Ligerito**. That is the headline.
+
+This article is **Part 1** of two. We build the foundations: what a zero-knowledge encoding is, the "committed sumcheck relation" the protocol actually tests, the right definition of HVZK for interactive oracle reductions (the standard one breaks under composition — we'll see exactly why), and the first of the two key technical pieces, an HVZK sumcheck reduction that drops a $2^k$-interleaved code down to its base code without paying a $2\times$ overhead. **Part 2** does the zero-knowledge code-switching protocol and assembles everything into the HVZK WHIR/Ligerito corollary.
+
+**Prerequisites.** You should know sumcheck, multilinear extensions, finite fields, list decoding, and the shape of WHIR-style folding. We lean on the [WHIR post](/writing/whir) for all of that — its folding section in particular. Out-of-domain sampling becomes load-bearing in Part 2; you can skim its WHIR-post treatment when you get there. Everything else (zero-knowledge encodings, the committed relation, HVZK for IORs) we build from scratch.
+
+## Tensoring vs. interleaving
+
+Code-agnostic protocols need _some_ structure to hang their tricks on, and there are two canonical ways to manufacture it from a base code: tensoring and interleaving. They are sister operations, both linear-time-prover-compatible, with very different tradeoffs.
+
+**A concrete picture.** Pin a tiny base code $\mathcal C \subseteq \Sigma^4$ — block length 4, alphabet $\Sigma$, codewords like $v = [v(1), v(2), v(3), v(4)]$. Now let's apply both operations to $\mathcal C$ and watch the shapes.
+
+**Tensoring** with $K = 3$. The product code $\mathcal C \otimes \mathcal C$ takes a $4 \times 4$ matrix whose every row _and_ every column is a codeword of $\mathcal C$. A toy element looks like:
+
+$$
+\begin{bmatrix}
+v_1(1) & v_1(2) & v_1(3) & v_1(4) \\
+v_2(1) & v_2(2) & v_2(3) & v_2(4) \\
+v_3(1) & v_3(2) & v_3(3) & v_3(4) \\
+v_4(1) & v_4(2) & v_4(3) & v_4(4)
+\end{bmatrix}
+$$
+
+— each row $v_i \in \mathcal C$ _and_ each column (read top-to-bottom) also in $\mathcal C$. Shape is 2D, alphabet still $\Sigma$, but rate and distance both shrink (squared).
+
+**Interleaving** with $K = 3$. The $3$-interleaving $\mathcal C^{\equiv 3} \subseteq (\Sigma^3)^4$ stacks _three_ codewords $v_1, v_2, v_3 \in \mathcal C$ side by side. Read along the columns:
+
+$$
+u \;=\; \big[\,(v_1(1), v_2(1), v_3(1)),\; (v_1(2), v_2(2), v_3(2)),\; (v_1(3), v_2(3), v_3(3)),\; (v_1(4), v_2(4), v_3(4))\,\big].
+$$
+
+Length-4 word, but each "letter" is now a triple over $\Sigma$ — alphabet blown up from $\Sigma$ to $\Sigma^3$. Rate and distance _unchanged_; you just have more codewords of $\mathcal C$ traveling in parallel.
+
+<img
+  src="/diagrams/zk-whir-tensor-vs-interleave.svg"
+  alt="Tensor C⊗C as a 4x4 matrix with rows and columns both in C, alongside the 3-interleaving C^≡3 as four length-3 column tuples stacked from three codewords v1, v2, v3 in C, showing the alphabet inflate from Σ to Σ^3 while block length stays 4."
+/>
+
+Two consequences fall straight out:
+
+- **Tensoring** opens up local testability and tensor sumchecks — there's structure on both axes. This is the world [TensorSwitch](/writing/tensorswitch-part-1) lives in. Cost: rate and distance both shrink (squared); encoding is slower; alphabet stays small but proofs get tricky.
+- **Interleaving** preserves rate and distance, encoding efficiency improves (and works in small space), and crucially this works for _every_ code. Price: alphabet inflates from $\Sigma$ to $\Sigma^K$, which precludes query-optimal IOPs.
+
+The WHIR/Ligerito family lives in the interleaving world, and so does this paper. "Works for every code" is exactly the code-agnostic promise we want to keep.
+
+## Zero-knowledge encodings: the foundational object
+
+### Why plain codes leak
+
+A plain linear-code encoding is **deterministic**: one message in, one codeword out. Look at three coordinates of the codeword, you've learned three linear functions of the message. Look at enough coordinates, you can reconstruct the message exactly. That's the entire story of why WHIR-style proximity testing leaks — the verifier's spot checks are reading positions of a codeword that's a fixed function of the witness, and you can't peek at the witness "a little bit" without peeking at it.
+
+### The fix, intuitively
+
+Make the encoding **randomized**. Now the same message produces _many_ different codewords — one per choice of fresh encoder randomness. The encoder picks one at random and sends it. The promise we want: anyone reading a few coordinates of the sent codeword should learn nothing about the underlying message. Every plausible message had a way to land on those exact coordinates, so the coordinates the verifier sees are consistent with anyone's witness.
+
+Think of it as a **one-time pad with a budget**. You can hide up to $t$ coordinates by spending enough random coins on the encoding. Beyond $t$, message structure starts showing through. The number $t$ is a parameter of the encoding — exactly the number of "free" reads the verifier is allowed without learning anything.
+
+### The smallest possible example
+
+The mechanics fall out in the tiniest Reed–Solomon case. One message coefficient $m$, one random coefficient $r$. The encoder treats $(m, r)$ as a polynomial
+
+$$
+p(X) \;=\; m + r \cdot X
+$$
+
+and evaluates $p$ at fixed nonzero points $x_1, x_2, \dots, x_n$. The codeword is $(p(x_1), p(x_2), \dots, p(x_n))$. Now look at any single output coordinate:
+
+$$
+p(x_i) \;=\; m + r \cdot x_i.
+$$
+
+Since $r$ is uniform over $\mathbb F$ and $x_i$ is a fixed nonzero scalar, $r \cdot x_i$ is uniform, and $p(x_i)$ — the value the verifier sees — is uniform too. The message $m$ contributes a constant shift, but the random coin $r$ has already smeared everything across $\mathbb F$. **One coordinate, perfectly hidden.**
+
+Two coordinates is more interesting, because $r$ links them: $p(x_i) - p(x_j) = r \cdot (x_i - x_j)$. The verifier can subtract them to recover $r$, then back out $m$. So $t = 1$ is the budget with this small encoding.
+
+### Scaling up
+
+Want $t$ hidden coordinates instead of one? Spend more randomness. Append $r$ fresh random field elements $\boldsymbol r$ to the message coefficients $\boldsymbol m$ and encode the resulting degree-$(\ell + r - 1)$ polynomial. Any $t \leq r$ coordinates of the codeword are then **jointly uniform** over $\mathbb F^t$: the random coefficients evaluated at $t \leq r$ distinct points form an invertible Vandermonde system, and the message contribution is just a constant shift the noise swallows.
+
+**Perfect $t$-query zero-knowledge for any $t \leq r$**, at the cost of $r$ extra symbols in the codeword. The randomness ate the leak.
+
+### The abstract object
+
+That picture generalizes to any code. We work over **$\mathbb F$-additive codes** — codes $\mathcal C \subseteq \Sigma^m$ whose alphabet $\Sigma$ is an $\mathbb F$-linear vector space (e.g. $\Sigma = \mathbb F^\iota$). $\Sigma = \mathbb F$ recovers ordinary linear codes; the interleaved $\mathcal C^{\equiv K}$ from the previous section is $\mathbb F$-additive whenever $\mathcal C$ is. The encoding is a randomized map
+
+$$
+\mathsf{Enc}_{\mathcal C} \colon \mathbb F^\ell \times \mathbb F^r \to \Sigma^m
+$$
+
+taking a message and randomness to a codeword. It is a **$t$-query zero-knowledge encoding** with error $\zeta$ if (i) its image lies in $\mathcal C$, and (ii) for any message $\boldsymbol m$ and any index set $S \subseteq [m]$ of size $\leq t$, the distribution $\mathsf{Enc}_{\mathcal C}(\boldsymbol m, \boldsymbol r)[S]$ over fresh $\boldsymbol r \leftarrow \mathbb F^r$ can be simulated up to statistical error $\zeta$ **given only $S$ — not $\boldsymbol m$**.
+
+Reed–Solomon with appended randomness hits the definition with $\zeta = 0$ (the Vandermonde argument above). [BCL22] gives linear-time-encodable instances. The construction is code-agnostic — we won't pin down $\mathcal C$ beyond this property.
+
+> **Notation throughout.** Bold $\boldsymbol m$ = the _message_ ($\ell$ field elements). Plain $f$ = its _codeword_: $f = \mathsf{Enc}_{\mathcal C}(\boldsymbol m, \boldsymbol r)$. The verifier sees $f$ as an oracle; the prover knows $\boldsymbol m$ and $\boldsymbol r$.
+
+## The committed sumcheck relation
+
+### What's actually being proved
+
+Step back. WHIR's job — and Ligerito's, and Blaze's, and every other code-agnostic IOPP's — is to convince the verifier of one shape of claim: **"the message inside this codeword satisfies some specified linear constraint."** The constraint is the _point_ of the proof; the codeword is the vehicle.
+
+What does "a specified linear constraint" look like? Three examples worth sitting with:
+
+- **"The polynomial whose coefficients are $\boldsymbol m$ evaluates to $\mu$ at point $x$."** This is the standard polynomial-commitment opening claim. Same as $\langle \boldsymbol m, (1, x, x^2, \dots, x^{\ell-1}) \rangle = \mu$ — a polynomial evaluation _is_ the inner product of coefficients with powers.
+- **"The first coefficient of $\boldsymbol m$ is $\mu$."** Same as $\langle \boldsymbol m, (1, 0, 0, \dots, 0) \rangle = \mu$.
+- **"The sum of $\boldsymbol m$'s coefficients is $\mu$."** Same as $\langle \boldsymbol m, (1, 1, 1, \dots, 1) \rangle = \mu$.
+
+All three are the same template — pick a vector, take an inner product, claim the result. Abstract it: there's a **query vector** $\boldsymbol v \in \mathbb F^\ell$ that says _which question is being asked_, and a **claimed answer** $\mu \in \mathbb F$. The protocol's job is to convince the verifier that the secret message $\boldsymbol m$ inside the codeword satisfies $\langle \boldsymbol m, \boldsymbol v \rangle = \mu$.
+
+**$\boldsymbol v$ is the question. $\mu$ is the answer.** That's all $\boldsymbol v$ does. Different $\boldsymbol v$ = different question.
+
+### The natural relation
+
+Translate that into an IOR-shaped relation. Verifier sees the question $\boldsymbol v$ and the claimed answer $\mu$ in the clear (explicit instance); has oracle access to a codeword $f$ (implicit instance); the prover knows the actual message and randomness:
+
+$$
+f = \mathsf{Enc}_{\mathcal C}(\boldsymbol m, \boldsymbol r) \quad \text{and} \quad \langle \boldsymbol m, \boldsymbol v \rangle = \mu.
+$$
+
+Call this $\bar{\mathcal R}_{\mathcal C}$. Fine starting point. Leaks twice.
+
+**Leak 1: the question $\boldsymbol v$ is too big to read.** $\boldsymbol v$ is $\ell$ field elements; a verifier that reads it runs in time $\Omega(\ell)$. We want polylog. **The question itself has to be encoded succinctly.**
+
+**Leak 2: the answer $\mu$ leaks the message.** Even if the encoding $\mathsf{Enc}_{\mathcal C}$ is perfectly zero-knowledge — so $f$ leaks nothing — sending $\mu = \langle \boldsymbol m, \boldsymbol v \rangle$ in the clear leaks one linear projection of $\boldsymbol m$. That's a real witness leak, and the protocol is going to want to talk about $\mu$ in the clear.
+
+The paper resolves both with two modifications.
+
+### Modification 1 — succinct linear forms
+
+**Intuition.** The first example of $\boldsymbol v$ above — the vector of powers $(1, x, x^2, \dots)$ — has $\ell$ entries, but it's described by a single field element $x$. You don't need to write the vector down; you can _generate it from $x$_ as needed. That's the move: instead of letting $\boldsymbol v$ live in the explicit instance as a flat $\ell$-long blob, let the explicit instance be a small _description_ of $\boldsymbol v$ — call it a **state** $\mathsf{st}$ — together with a fixed function $\mathsf{sl}$ (a "succinct linear form") that knows how to unpack the state into the full $\boldsymbol v$ when needed.
+
+Formally: replace $\boldsymbol v$ in the relation with $\boldsymbol v = \mathsf{sl}(\mathsf{st})$, where $\mathsf{st}$ is small. The verifier never reads $\boldsymbol v$ entry-by-entry; it only ever needs to evaluate _folds_ of $\boldsymbol v$ (sumcheck reductions act on $\boldsymbol v$ via this fold operation), and a fold of a succinct linear form is itself computable from $\mathsf{st}$ in polylog time, following the WHIR recipe.
+
+**Anchor example.** $\mathsf{sl}(\alpha) := (\alpha^{i-1})_{i \in [\ell]}$. State is the single field element $\alpha$, $\boldsymbol v$ is the vector of powers of $\alpha$, and the constraint $\langle \boldsymbol m, \boldsymbol v \rangle = \mu$ reads "the polynomial with coefficients $\boldsymbol m$ evaluates to $\mu$ at $\alpha$." This particular form is closely related to the sumcheck-style succinct constraints in [WHIR](/writing/whir); the two are formally incomparable but both work for our purposes.
+
+### Modification 2 — masks in the constraint
+
+**Intuition.** The answer $\mu$ is leaky because $\mu = \langle \boldsymbol m, \boldsymbol v \rangle$ is _exactly_ a linear projection of the message. Stare at $\mu$, you've stared at one bit of the witness.
+
+The fix is the standard zero-knowledge move: add noise. Have the prover commit to a fresh random mask and sneak the mask's contribution into the answer. The verifier now sees $\mu' = \langle \boldsymbol m, \boldsymbol v \rangle + (\text{mask contribution})$; the prover knows both pieces; the verifier sees only the sum and can't separate them. The mask absorbs the leak.
+
+**Where the mask comes from.** The prover, before any of this gets sent to the verifier, samples small **uniformly random vectors** $\boldsymbol \xi_1, \dots, \boldsymbol \xi_n \in \mathbb F^{\ell_{\mathsf{zk}}}$ — one mask per "slot" we want to hide, each just a tiny block of fresh field-element noise. "Small" means $\ell_{\mathsf{zk}}$ is way shorter than $\ell$; these are nothing compared to the witness message $\boldsymbol m$.
+
+To make these masks _committable_ — so the verifier can ask questions about them without learning them — encode each $\boldsymbol \xi_i$ under a **separate $\mathbb F$-additive code $\mathcal C_{\mathsf{zk}}$** dedicated to masks, with its own ZK encoding $\mathsf{Enc}_{\mathcal C_{\mathsf{zk}}}$. The resulting codewords $\xi_i = \mathsf{Enc}_{\mathcal C_{\mathsf{zk}}}(\boldsymbol \xi_i, \boldsymbol r_i)$ are sent to the verifier as additional oracles. Each mask comes with its own query vector $\boldsymbol u_i \in \mathbb F^{\ell_{\mathsf{zk}}}$ — same role $\boldsymbol v$ played for $\boldsymbol m$, just for the mask side.
+
+The relation now demands a single **joint constraint**:
+
+$$
+\langle \boldsymbol m, \mathsf{sl}(\mathsf{st}) \rangle + \sum_{i \in [n]} \langle \boldsymbol \xi_i, \boldsymbol u_i \rangle \;=\; \mu.
+$$
+
+**How this actually hides $\mu$.** Stare at one mask term $\langle \boldsymbol \xi_i, \boldsymbol u_i \rangle$. The mask message $\boldsymbol \xi_i$ is uniform random over $\mathbb F^{\ell_{\mathsf{zk}}}$; the query vector $\boldsymbol u_i$ is fixed. The inner product of a uniform random vector with a fixed nonzero vector is itself a uniform random scalar over $\mathbb F$. So each $\langle \boldsymbol \xi_i, \boldsymbol u_i \rangle$ is a fresh uniform field element, and the sum $\sum_i \langle \boldsymbol \xi_i, \boldsymbol u_i \rangle$ is also uniform. Read the equation:
+
+$$
+\underbrace{\langle \boldsymbol m, \mathsf{sl}(\mathsf{st}) \rangle}_{\text{real projection of } \boldsymbol m} \;+\; \underbrace{\sum_i \langle \boldsymbol \xi_i, \boldsymbol u_i \rangle}_{\text{fresh uniform scalar}} \;=\; \mu.
+$$
+
+That's a one-time pad on $\mu$. From the verifier's view $\mu$ is a uniform field element — it could correspond to _any_ value of the real projection, with the masks absorbing whatever offset is needed. Knowing $\mu$ leaks nothing about $\langle \boldsymbol m, \mathsf{sl}(\mathsf{st}) \rangle$.
+
+**Why the verifier can't unmask.** Reasonable worry: the verifier has oracle access to the mask codewords $\xi_i$. Could it just query them and reconstruct $\langle \boldsymbol \xi_i, \boldsymbol u_i \rangle$? No — and this is precisely why $\mathcal C_{\mathsf{zk}}$ is itself a ZK code. The same Vandermonde-style argument from §"Zero-knowledge encodings" applies: any $\leq t_{\mathsf{zk}}$ coordinates of $\xi_i$ are uniform over $\Sigma_{\mathsf{zk}}^{t_{\mathsf{zk}}}$ given only their positions, so the mask message $\boldsymbol \xi_i$ stays hidden behind the encoding the same way $\boldsymbol m$ stays hidden behind $f$. The ZK encoding on the mask side closes the loop.
+
+Putting both modifications together gives the relation we'll work with for the rest of this article:
+
+$$
+\mathcal R_{\mathcal C, \mathcal C_{\mathsf{zk}}, \mathsf{sl}} \;:=\; \left\{
+\begin{aligned}
+&\mathsf{x} = (\mu, \mathsf{st}, (\boldsymbol u_i)_{i \in [n]}) \\
+&\mathsf{y} = (f, (\xi_i)_{i \in [n]}) \\
+&\mathsf{w} = (\boldsymbol m, \boldsymbol r, (\boldsymbol \xi_i, \boldsymbol r_i)_{i \in [n]})
+\end{aligned}
+\;\middle|\;
+\begin{aligned}
+&f = \mathsf{Enc}_{\mathcal C}(\boldsymbol m, \boldsymbol r) \\
+&\forall i \in [n]\colon \xi_i = \mathsf{Enc}_{\mathcal C_{\mathsf{zk}}}(\boldsymbol \xi_i, \boldsymbol r_i) \\
+&\langle \boldsymbol m, \mathsf{sl}(\mathsf{st}) \rangle + \sum_{i} \langle \boldsymbol \xi_i, \boldsymbol u_i \rangle = \mu
+\end{aligned}
+\right\}.
+$$
+
+This is the **committed sumcheck relation**. Three things to name:
+
+- $f$ is the **main oracle** — the codeword encoding the witness message.
+- $(\xi_i)_{i \in [n]}$ are **mask oracles** — small codewords that exist purely to hide the constraint.
+- The last line is the **joint constraint** — a single succinct linear relation that ties the main message and the mask messages together.
+
+<img
+  src="/diagrams/zk-whir-committed-relation.svg"
+  alt="Structure of the committed sumcheck relation: main oracle f at top (large box, labeled Enc_C(m, r)) and n mask oracles ξ_1, ..., ξ_n at left (smaller boxes, labeled Enc_{C_zk}(ξ_i, r_i)) feed into a joint-constraint node at the bottom that evaluates ⟨m, sl(st)⟩ + Σ ⟨ξ_i, u_i⟩ and asserts equality with the public target μ. The explicit instance (μ, st, (u_i)) sits to the right of the constraint node as the verifier-side input."
+/>
+
+The "committed" in _committed sumcheck relation_ is doing real work: the implicit instance $\mathsf{y} = (f, (\xi_i))$ behaves like a commitment to the message _and_ the masks at the same time. Future protocols will accumulate more claims about this joint object; the masks travel with the protocol as oracles rather than being committed-and-opened once. Hold that thought — it's the central design decision that makes the sumcheck step work later.
+
+## Composable HVZK for IORs (and the counterexample that forces it)
+
+The whole construction is "compose small zero-knowledge pieces." So we need a definition of zero-knowledge that survives composition. The textbook one doesn't. Let's see exactly how it breaks, because the fix is one of the conceptual contributions of the paper.
+
+### IORs, briefly
+
+We are working with **interactive oracle reductions** (IORs), not IOPs. The difference: an IOR verifier doesn't output accept/reject — it outputs a new instance for some target relation $\mathcal R'$. The instance is split: an _explicit_ part the next verifier receives as input, and an _implicit_ part the next verifier receives as an oracle. So an IOR from $\mathcal R$ to $\mathcal R'$ takes $(\mathsf{x}, \mathsf{y}, \mathsf{w}) \in \mathcal R$ and produces $(\mathsf{x}', \mathsf{y}', \mathsf{w}') \in \mathcal R'$ via an interaction. Composition stitches IORs end-to-end: $\mathsf{IOR}_1 \circ \mathsf{IOR}_2$ runs the first reduction, then runs the second on its output.
+
+This is the right abstraction for our purposes because the WHIR/Ligerito construction is a tower of reductions: sumcheck reduces interleaving to base, code-switching reduces big code to small code, repeat, finally land in a tiny instance you can check directly.
+
+### The standard HVZK definition
+
+The standard notion of HVZK for IOPPs says: there exists an efficient simulator $\mathsf{S}$ such that the simulated view $\mathsf{S}^{\mathsf{y}}(\mathsf{x})$ is statistically close to the real $\mathsf{View}(\mathbf{P}, \mathbf{V}, \mathsf{x}, \mathsf{y}, \mathsf{w})$, with the simulator allowed oracle access to the implicit instance $\mathsf{y}$ and a bounded query budget. Adapt this to IORs unchanged — and watch it shatter.
+
+### The counterexample
+
+Build a relation $\mathcal R$ with instance-witness pairs $(\mathsf{x}, \mathsf{w})$, and a ternary target $\mathcal R' = \{(\mathsf{x}', \mathsf{y}', \mathsf{w}' = \bot) : (\mathsf{x}', \mathsf{y}') \in \mathcal R\}$. Now consider two trivially "HVZK" IORs:
+
+- **$\mathsf{IOR}_1$.** Prover sends $\mathsf{w}$ as an oracle. Verifier makes _no_ queries, then outputs the new instance $(\mathsf{x}', \mathsf{y}') := (\mathsf{x}, \mathsf{w})$. This is honestly an IOR from $\mathcal R$ to $\mathcal R'$ with perfect completeness and soundness. The verifier's view is _empty_ (zero queries), so it's trivially HVZK under the standard definition.
+- **$\mathsf{IOR}_2$.** Prover does nothing. Verifier queries the entire implicit instance $\mathsf{y}'$ and checks $(\mathsf{x}', \mathsf{y}') \in \mathcal R$. Also HVZK — the standard definition lets the simulator query the implicit instance to its heart's content.
+
+Each piece passes the bar. Compose them: $\mathsf{IOR}_1 \circ \mathsf{IOR}_2$ has the prover send $\mathsf{w}$ as the implicit instance, and the second verifier queries the whole thing. **The verifier of the composed protocol learns the witness.** That is obviously not HVZK.
+
+<img
+  src="/diagrams/zk-whir-ior-compose-leak.svg"
+  alt="Two-box pipeline showing the composition leak: IOR_1 (left box) takes (x, w) and outputs implicit instance y' = w with zero verifier queries — marked HVZK. IOR_2 (right box) takes y' as an oracle and queries it in full — also marked HVZK. The seam between the boxes carries an arrow labeled 'w as oracle'; a dashed red arrow from IOR_2's queries reaches back through the seam and exfiltrates w to the verifier. Caption: each piece passes the standard definition; composition reveals the witness."
+/>
+
+The bug is structural. Definition-as-stated says nothing about _what the next protocol does with the output implicit instance_. $\mathsf{IOR}_1$ has no problem with its own simulator (no queries to simulate); the harm only materializes when $\mathsf{IOR}_2$'s queries reach into the oracle $\mathsf{IOR}_1$ produced. The definition has a blind spot the moment you compose.
+
+### The fix — distinguishers
+
+Strengthen the definition so the simulator is responsible for simulating not just the verifier's own queries, but also _future queries to the output implicit instance $\mathsf{y}'$_. Model those future queries with an oracle algorithm $\mathcal D$, called a **distinguisher**. An IOR is **HVZK with respect to $\mathcal D$** if there's a simulator $\mathsf{S}$ such that
+
+$$
+\mathsf{S}^{\mathsf{y}, \mathcal D}(\mathsf{x}) \;\approx_\zeta\; \mathsf{View}(\mathbf P, \mathbf V, \mathcal D, \mathsf{x}, \mathsf{y}, \mathsf{w}),
+$$
+
+where the simulator runs $\mathcal D$ as a black box (in particular it can run $\mathcal D(\mathsf{x}')$ to figure out what queries $\mathcal D$ would make and produce simulated answers).
+
+When $\mathcal D$ is trivial — makes no queries — this collapses to the standard definition. The interesting cases pin $\mathcal D$ to specific classes; for our protocols we'll use $\mathfrak D^{\leq t}$, distinguishers making at most $t$ queries to the implicit instance.
+
+### Composition
+
+Under this definition, composition behaves. Informally:
+
+> **Composition theorem (Lemma 2.6 of the paper).** If $\mathsf{IOR}_2$ is HVZK with respect to $\mathcal D_2$ with simulator $\mathsf{S}_2$, and $\mathsf{IOR}_1$ is HVZK with respect to the distinguisher $\mathcal D_1 := \mathsf{S}_2$, then $\mathsf{IOR}_1 \circ \mathsf{IOR}_2$ is HVZK with errors adding: $\zeta_1 + \zeta_2$.
+
+The idea: the simulator for $\mathsf{IOR}_1$ uses $\mathsf{S}_2$ as its distinguisher — the only "future queries" that matter are the ones $\mathsf{IOR}_2$'s simulator will make. Statistical distances chain along the seam.
+
+The practical upshot: every IOR we build will be HVZK with respect to a specific bounded distinguisher class, and that distinguisher class is exactly what's needed by whatever IOR is going to consume its output. The framework forces you to make the "future queries" explicit, which is exactly what the counterexample showed you have to do.
+
+## The HVZK sumcheck reduction
+
+Now the first of the two key technical contributions: an **HVZK reduction from testing the interleaving of a code to testing the base code itself**. It is what kicks the verifier's job down from a $2^k$-blown-up alphabet to the original. It is also where this paper buys $1 + o(1)$ overhead instead of $\geq 2\times$.
+
+### The setup: interleaving via multilinear decomposition
+
+We are going to interleave by a power-of-two factor $K = 2^k$. The trick is to define the $2^k$-interleaving _directly in terms of_ a zero-knowledge encoding, by splitting the message into $2^k$ pieces using multilinear-polynomial structure.
+
+Let $\mathsf{eq}(\mathsf X_1, \dots, \mathsf X_k, \mathsf Y_1, \dots, \mathsf Y_k) := \prod_{i=1}^k (\mathsf X_i \mathsf Y_i + (1 - \mathsf X_i)(1 - \mathsf Y_i))$ — the familiar equality polynomial in $k$ pairs of variables.
+
+Given a message $\boldsymbol m \in \mathbb F^{2^k \ell}$ and randomness $\boldsymbol r \in \mathbb F^{2^k r}$, view them as $2^k$ pieces $(\boldsymbol m_{\boldsymbol b})_{\boldsymbol b \in \{0,1\}^k}$ and $(\boldsymbol r_{\boldsymbol b})_{\boldsymbol b \in \{0,1\}^k}$, indexed by the boolean hypercube of side $k$. The interleaved encoding $\mathsf{Enc}_{\mathcal C^{\equiv 2^k}}(\boldsymbol m, \boldsymbol r)$ separately encodes each piece under $\mathsf{Enc}_{\mathcal C}$ and stacks the results:
+
+$$
+\forall z \in [m]\colon\quad \mathsf{Enc}_{\mathcal C^{\equiv 2^k}}(\boldsymbol m, \boldsymbol r)(z) \;:=\; \big(\mathsf{Enc}_{\mathcal C}(\boldsymbol m_{\boldsymbol b}, \boldsymbol r_{\boldsymbol b})(z)\big)_{\boldsymbol b \in \{0,1\}^k} \;\in\; \Sigma^{2^k}.
+$$
+
+The multilinear interpretation: if you view $\boldsymbol m$ and $\boldsymbol r$ as multilinear polynomials $\hat{\boldsymbol m}, \hat{\boldsymbol r}$ in $k + \log \ell$ and $k + \log r$ variables respectively, the first $k$ variables index which "piece" you're in, and the remaining variables index inside the piece.
+
+### Interleaved folding
+
+The other half of the trick: how to _fold_ an interleaved codeword. The **interleaved fold** of a function $f \colon [m] \to \Sigma^{2^k}$ at a point $\boldsymbol \gamma \in \mathbb F^k$ outputs a function $[m] \to \Sigma$ defined by
+
+$$
+\mathsf{Fold}(f, \boldsymbol \gamma)(z) \;:=\; \sum_{\boldsymbol b \in \{0,1\}^k} \mathsf{eq}(\boldsymbol b, \boldsymbol \gamma) \cdot f_{\boldsymbol b}(z),
+$$
+
+where $f_{\boldsymbol b}(z) \in \Sigma$ is the $\boldsymbol b$-th coordinate of the $\Sigma^{2^k}$-vector $f(z)$. Concretely, the verifier folds an interleaved codeword by taking the $\mathsf{eq}$-weighted combination of its $2^k$ coordinates at every position.
+
+The construction is set up so the natural identity holds:
+
+> **Claim (encode-then-fold = fold-then-encode).** For every message $\boldsymbol m$, randomness $\boldsymbol r$, and folding point $\boldsymbol \gamma \in \mathbb F^k$,
+> $$\mathsf{Fold}\big(\mathsf{Enc}_{\mathcal C^{\equiv 2^k}}(\boldsymbol m, \boldsymbol r),\, \boldsymbol \gamma\big) \;=\; \mathsf{Enc}_{\mathcal C}\big(\mathsf{Fold}(\boldsymbol m, \boldsymbol \gamma),\, \mathsf{Fold}(\boldsymbol r, \boldsymbol \gamma)\big).$$
+
+In English: folding the interleaved codeword gives you a valid base-code codeword whose message is the fold of the original messages. The prover folds messages, the verifier folds codewords, and the two stay in sync. This is a direct extension to zero-knowledge codes of the folding identities used in [WHIR](/writing/whir), STIR, and Ligerito.
+
+<img
+  src="/diagrams/zk-whir-fold-commute.svg"
+  alt="Commuting square: top-left is the message-randomness pair (m, r) over the 2^k hypercube; arrows go right via Enc_{C^{≡2^k}} to the interleaved codeword f, and down via Fold(·, γ) to the folded message-randomness pair. Both paths converge at bottom-right on the same base-code codeword Enc_C(Fold(m, γ), Fold(r, γ)). Square commutes."
+/>
+
+### The reduction, operationally
+
+We have an instance of $\mathcal R_{\mathcal C^{\equiv 2^k}, \mathcal C_{\mathsf{zk}}, \mathsf{sl}}$: a $2^k$-interleaved main oracle $f$, $n$ small mask oracles $(\xi_i)$, and a joint constraint with target $\mu$. The reduction outputs an instance of $\mathcal R_{\mathcal C, \mathcal C_{\mathsf{zk}}, \mathsf{sl}'}$ — same shape, but over the _base_ code $\mathcal C$, with a new succinct linear form $\mathsf{sl}'$ that encodes the fold.
+
+Operationally, the protocol does this:
+
+1. **Prover commits to small per-round masks.** Sample $k$ small mask messages $\boldsymbol s_1, \dots, \boldsymbol s_k \in \mathbb F^{\ell_{\mathsf{zk}}}$ and encode each under $\mathcal C_{\mathsf{zk}}$ to get $k$ additional mask oracles $s_1, \dots, s_k$. Interpret each $\boldsymbol s_j$ as a univariate polynomial $\hat s_j(\mathsf X) := \sum_{l} (\boldsymbol s_j)_l \cdot \mathsf X^{l-1}$. Send a masked target $\tilde \mu \in \mathbb F$ designed so that, in the honest case, $\tilde \mu = \sum_{\boldsymbol b \in \{0,1\}^k} (\hat s_1(b_1) + \dots + \hat s_k(b_k))$.
+2. **Verifier sends batching scalar $\varepsilon \leftarrow \mathbb F$.**
+3. **Run a $k$-round sumcheck** on the claim
+   $$\sum_{\boldsymbol b \in \{0,1\}^k} \big(\hat s_1(b_1) + \dots + \hat s_k(b_k) + \varepsilon \cdot \hat G(\boldsymbol b)\big) \;=\; \tilde \mu + \varepsilon \cdot \mu,$$
+   where $\hat G(\boldsymbol b) := \big(\sum_{\boldsymbol a \in \{0,1\}^{\log \ell}} \hat{\boldsymbol m}(\boldsymbol b, \boldsymbol a) \cdot \mathsf{Fold}(\mathsf{sl}(\mathsf{st}), \boldsymbol b)[\boldsymbol a]\big) + \sum_i \langle \boldsymbol \xi_i, \boldsymbol u_i \rangle$ — i.e. the message-times-fold-of-the-coefficients piece, plus the old mask-constraint terms. Each round binds one boolean variable to a fresh field challenge $\gamma_j$; after $k$ rounds the verifier holds $\boldsymbol \gamma = (\gamma_1, \dots, \gamma_k)$.
+4. **Output the new instance.** The output target $\mu' := \hat s_k(\gamma_k)$, the output implicit instance is $(\mathsf{Fold}(f, \boldsymbol \gamma), (\xi_i), (s_j))$ — the folded main oracle plus the old masks plus the new sumcheck masks — and the output joint constraint, after some careful regrouping, is a fresh committed-sumcheck relation over the base code $\mathcal C$.
+
+After this single reduction, the problem size has dropped from $2^k \cdot m$ alphabet symbols to $m$ — the size of one base codeword.
+
+### The point — small masks, not a full mask
+
+This is where $1 + o(1)$ overhead is won. Prior zero-knowledge sumchecks ([CFS17], [BCL22], the binary-field variant [Dia25]) add a _full_ random polynomial of the same size as the message, then prove the original claim relative to it via a random linear combination. That doubles prover work — every operation has to be done on a $2\times$-sized object. It's a clean construction; it's also too expensive for our setting.
+
+This paper does it differently: **one small mask per sumcheck round, à la [XZZPS19]**, instead of a single full mask up front. Each mask oracle $s_j$ has size only $\ell_{\mathsf{zk}}$ (much smaller than $\ell$, the actual message size). With $k$ rounds and $\ell_{\mathsf{zk}} \ll \ell$, the total masking overhead is sublinear — exactly the $o(1)$ we want.
+
+That's the high-level move. The non-trivial part is making it composable with the WHIR/Ligerito recursion. Three details earn their place:
+
+- **Masks travel as oracles, not opened evaluations.** [XZZPS19]'s zero-knowledge sumcheck reveals an evaluation of the mask polynomial at the end — and inside our framework that would reveal an evaluation of $\hat{\boldsymbol m}$, breaking ZK. We cannot afford that. Instead, the reduction _accumulates a claim about the masks_ into the next relation's joint constraint and carries the mask oracles forward. This is exactly the work the "committed" part of $\mathcal R_{\mathcal C, \mathcal C_{\mathsf{zk}}, \mathsf{sl}}$ was set up to do. Without the joint constraint in the relation, this sumcheck would not compose.
+- **$\mathsf{char}(\mathbb F) \neq 2$.** The HVZK argument requires the mask contribution to the sumcheck claim not to cancel via the random linear combination. Over fields of characteristic 2 it can, so we need $\mathsf{char}(\mathbb F) \neq 2$ for the masks to actually mask. A real instantiation constraint, but it doesn't bite for the fields the WHIR/Ligerito family cares about (Goldilocks, BabyBear, large primes).
+- **Correlating queries over the larger alphabet.** Round-by-round knowledge soundness wants a union bound over codewords at distance $\delta$ from the sent oracles. Naively, you'd "open up" the interleaved word $f$ into its $2^k$ base-code parts and union-bound each — leading to a union over $|\Lambda(\mathcal C, \delta)|^{2^k}$ events. That blows up the required field size to absurdity. The fix: analyze codewords _relative to the interleaved codes_ $\mathcal C^{\equiv 2^k}$ and $\mathcal C_{\mathsf{zk}}^{\equiv n+k}$ directly. Interleaving raises a code's list size by only a constant factor [GGR11], so the union bound stays modest. Operationally, the verifier's queries are _correlated_ across the $2^k$ stacked base-codewords — they all share the same position — and this correlation is the soundness lever. It also shrinks compiled argument size as a bonus, because correlated queries become a single Merkle path over the bigger alphabet rather than $2^k$ paths.
+
+### What this buys us
+
+After running the reduction once, we have:
+
+- Reduced testing the $2^k$-interleaving of $\mathcal C$ to testing $\mathcal C$ itself.
+- Reduced problem size by a factor of $2^k$.
+- Spent $\widetilde O(k \cdot \lambda)$ extra symbols on masks — sublinear in $m$.
+- Preserved HVZK with respect to a bounded distinguisher class, by carrying mask oracles forward and accumulating their constraints.
+
+The natural next move is to recursively shrink the codeword, which is the WHIR/Ligerito move. Each round takes a code, $2^k$-interleaves it, runs this sumcheck reduction to drop the interleaving, then _switches_ to a new, smaller code and does it again. Recurse $O(\log \ell / \log\log \ell)$ times and the verifier ends up looking at something tiny enough to handle directly.
+
+But the "switch to a new code" step is the second non-trivial piece, and naive code-switching is incompatible with zero-knowledge in two distinct ways. That's [Part 2](/writing/zk-whir-part-2).
+
+## Why we're not done yet
+
+We have, in zero-knowledge, the ability to **reduce testing the interleaving of a code to testing the base code itself**, at $1 + o(1)$ overhead, with composable HVZK guarantees that survive being plugged into a larger pipeline. That is half the construction.
+
+The other half: at some point we need to stop testing $\mathcal C$ and start testing something _smaller_ — a code with shorter message length, so that recursion actually terminates in something cheap. That's **code-switching**: an IOR from a test for code $\mathcal C$ to a test for code $\mathcal C'$. WHIR uses it, Ligerito uses it, Blaze uses it. The non-ZK version is well understood; this paper had to find the ZK version.
+
+Two things break when you try to make the standard code-switching template zero-knowledge:
+
+- **The randomness in the encoding gets in the way.** The consistency check between old and new codewords assumes the codeword is a function of the message alone. With a zero-knowledge encoding it isn't — it's a function of the message _and_ the randomness — and the obvious fix (encoding both into the new code) costs another $2\times$.
+- **Out-of-domain sampling is incompatible with privacy.** WHIR's OOD trick is what lets the protocol work in the list-decoding regime. The OOD vector forces the prover to commit to a _single_ codeword among the possibilities — which is exactly what zero-knowledge forbids.
+
+The resolution to both: a new gadget called a **private zero-evader**, and a joint OOD sample that operates on the message _and_ fresh randomness. That, plus assembling everything into the headline corollary — an HVZK variant of WHIR/Ligerito at $1 + o(1)$ overhead — is Part 2.
+
+## References
+
+- **This paper** — Chiesa, A., Fenzi, G., & Weissenberg, G. (Feb 2026). _Zero-Knowledge IOPPs for Constrained Interleaved Codes._
+- **WHIR** — Arnon, G., Chiesa, A., Fenzi, G., & Yogev, E. (2025). _WHIR: Reed–Solomon Proximity Testing with Super-Fast Verification._ EUROCRYPT '25. [eprint](https://eprint.iacr.org/2024/1586)
+- **Ligerito** — Novakovic, A., & Angeris, G. (2025). _Ligerito: A Small and Concretely Fast Polynomial Commitment Scheme._ [eprint 2025/1187](https://eprint.iacr.org/2025/1187)
+- **STIR** — Arnon, G., Chiesa, A., Fenzi, G., & Yogev, E. (2024). _STIR: Reed–Solomon Proximity Testing with Fewer Queries._ CRYPTO '24.
+- **Ligero** — Ames, S., Hazay, C., Ishai, Y., & Venkitasubramaniam, M. (2017). _Ligero: Lightweight Sublinear Arguments Without a Trusted Setup._ CCS '17.
+- **BCL22** — Bootle, J., Chiesa, A., & Liu, S. (2022). _Zero-Knowledge IOPs with Linear-Time Prover and Polylogarithmic-Time Verifier._ EUROCRYPT '22.
+- **RW24** — Ron-Zewi, N., & Weiss, M. (2024). _Zero-knowledge IOPs Approaching Witness Length._ CRYPTO '24.
+- **XZZPS19 (Libra)** — Xie, T., Zhang, J., Zhang, Y., Papamanthou, C., & Song, D. (2019). _Libra: Succinct Zero-Knowledge Proofs with Optimal Prover Computation._ CRYPTO '19.
+- **CFS17** — Chiesa, A., Forbes, M.A., & Spooner, N. (2017). _A Zero Knowledge Sumcheck and its Applications._ [arXiv:1704.02086](https://arxiv.org/abs/1704.02086)
+- **GGR11** — Gopalan, P., Guruswami, V., & Raghavendra, P. (2011). _List Decoding Tensor Products and Interleaved Codes._ SICOMP 40(5).
+- **Dia25** — Diamond, B. (2025). _Zero-Knowledge Polynomial Commitment in Binary Fields._ [eprint 2025/1015](https://eprint.iacr.org/2025/1015)
+- **TensorSwitch (companion blog)** — [TensorSwitch I](/writing/tensorswitch-part-1).
+- **WHIR (companion blog)** — [WHIR](/writing/whir).
+- **Spartan + SPARK (companion blogs)** — [Spartan](/writing/spartan-protocol), [SPARK](/writing/spark).
