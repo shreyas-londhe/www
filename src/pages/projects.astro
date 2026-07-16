@@ -7,9 +7,11 @@ import { fetchStars, formatStars } from "../lib/github-stars";
 const repoMap: Record<string, string> = {
   "zk-email-verify": "zkemail/zk-email-verify",
   "zk-regex v2": "zkemail/zk-regex",
-  "jwt-tx-builder": "zkemail/email-tx-builder",
+  "jwt-tx-builder": "zkemail/zk-jwt",
   "ProveKit": "worldfnd/provekit",
   "WHIR": "WizardOfMenlo/whir",
+  "Jolt": "a16z/jolt",
+  "spongefish": "arkworks-rs/spongefish",
 };
 
 const starCounts = await Promise.all(
@@ -39,18 +41,35 @@ const projects = [
   },
   {
     label: "jwt-tx-builder",
-    href: "https://github.com/zkemail/email-tx-builder",
+    href: "https://github.com/zkemail/zk-jwt",
     description:
       "Proving OAuth identity (e.g., Google Workspace membership) via JWT verification in ZK.",
     role: "Author @ ZkEmail",
     stars: formatStars(liveStars["jwt-tx-builder"], "80+"),
   },
   {
+    label: "Jolt",
+    href: "https://github.com/a16z/jolt",
+    description:
+      "RISC-V zkVM from a16z crypto. Wrote the spec driving its Fiat-Shamir transcript migration to spongefish; earlier added domain-separation labels to the transcript.",
+    role: "Contributor @ a16z crypto",
+    stars: formatStars(liveStars["Jolt"], "1000+"),
+  },
+  {
     label: "ProveKit",
     href: "https://github.com/worldfnd/provekit",
-    description: "Client-side zero-knowledge proving.",
-    role: "Contributor @ World",
+    description:
+      "Client-side zero-knowledge proving for World ID. Core contributor for the past year: layered witness solving with batch inversion, sound challenge generation for LogUp and Spice, a SHA-256 blackbox, recursive verification fixes, prover memory work, and a field-generic proving spine.",
+    role: "Core contributor @ World",
     stars: formatStars(liveStars["ProveKit"], "100+"),
+  },
+  {
+    label: "spongefish",
+    href: "https://github.com/arkworks-rs/spongefish",
+    description:
+      "Fiat-Shamir library for arkworks. Added mandatory session binding via type-state and made the duplex sponge portable across pointer widths.",
+    role: "Contributor @ arkworks",
+    stars: formatStars(liveStars["spongefish"], "100+"),
   },
   {
     label: "WHIR",
@@ -70,7 +89,7 @@ const projects = [
   },
   {
     label: "zkFOCIL",
-    href: null,
+    href: "https://ethresear.ch/t/zkfocil-implementation-benchmarking-report/23966",
     description:
       "ZK circuit to anonymize Ethereum FOCIL includer identities, replacing public signatures with proofs to prevent coercion/legal targeting. Built using Barretenberg stdlib and Ultra Honk.",
     role: "Ethereum Foundation grant",
@@ -119,7 +138,7 @@ const projects = [
                 <span class="font-medium">{project.label}</span>
               )}
               {project.stars && (
-                <span class="rounded border border-blue-200 px-1.5 py-0.5 text-xs text-blue-500 dark:border-blue-900 dark:text-blue-400">
+                <span class="font-mono text-xs text-neutral-500 dark:text-neutral-400">
                   {project.stars} ★
                 </span>
               )}

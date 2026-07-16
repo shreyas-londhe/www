@@ -7,6 +7,19 @@
 @custom-variant dark (&:where(.dark, .dark *));
 
 @theme {
+  /* Neutrals tinted cool (slate) so the grey ground leans toward the blue accent */
+  --color-neutral-50: #f8fafc;
+  --color-neutral-100: #f1f5f9;
+  --color-neutral-200: #e2e8f0;
+  --color-neutral-300: #cbd5e1;
+  --color-neutral-400: #94a3b8;
+  --color-neutral-500: #64748b;
+  --color-neutral-600: #475569;
+  --color-neutral-700: #334155;
+  --color-neutral-800: #1e293b;
+  --color-neutral-900: #0f172a;
+  --color-neutral-950: #020617;
+
   --animate-intro: intro 0.3s forwards ease-in-out;
 
   @keyframes intro {
@@ -23,25 +36,17 @@
 
 @font-face {
   font-family: "Inter";
-  src: url("/inter/thin.woff2") format("woff2");
-  font-weight: normal;
+  src: url("/inter/InterVariable.woff2") format("woff2");
+  font-weight: 100 900;
   font-style: normal;
   font-display: swap;
 }
 
 @font-face {
   font-family: "Inter";
-  src: url("/inter/regular.woff2") format("woff2");
-  font-weight: normal;
-  font-style: normal;
-  font-display: swap;
-}
-
-@font-face {
-  font-family: "Inter";
-  src: url("/inter/semibold.woff2") format("woff2");
-  font-weight: normal;
-  font-style: normal;
+  src: url("/inter/InterVariable-Italic.woff2") format("woff2");
+  font-weight: 100 900;
+  font-style: italic;
   font-display: swap;
 }
 
@@ -54,11 +59,11 @@
 
   body {
     font-family:
+      "Inter",
       system-ui,
       -apple-system,
-      "Inter",
       sans-serif;
-    letter-spacing: -2%;
+    letter-spacing: -0.02em;
     @apply bg-neutral-100 text-neutral-900 transition-colors duration-300 dark:bg-neutral-900 dark:text-neutral-100;
   }
 

@@ -1,0 +1,153 @@
+---
+layout: ../../components/blog-post.astro
+title: "Frame Transactions: Native Account Abstraction in EIP-8141"
+description: "EIP-8141 decomposes an Ethereum transaction into typed frames — validate, approve payment, execute — making account abstraction native to the protocol with no alt-mempool or EntryPoint contract"
+pubDate: "2026-07-11"
+tags: ["ethereum", "account-abstraction", "transactions"]
+---
+
+## The wall
+
+If you've tried to build a smart-contract wallet on Ethereum, you've hit the same wall every time: **only an EOA can originate a transaction.**
+
+That wall casts a long shadow. Because only an externally-owned account can originate, the ECDSA key _is_ the account: lose the key, lose the account — no rotation, no recovery. Authentication is hardcoded: no passkeys, no multisig at the protocol level, and no path off secp256k1 if quantum computers arrive. Whoever originates pays the gas, so onboarding a new user means first getting them ETH. And one transaction is one call — no batching several actions into one atomic unit.
+
+Every "account abstraction" proposal so far has been a workaround for that wall. **EIP-3074** added opcodes letting an EOA delegate authority to a sponsor for one transaction — sponsor-based, EOA-centric, effectively deprioritized. **ERC-4337** delivers full account abstraction today, but because it couldn't change the transaction format, it rebuilt everything one layer up: UserOperations instead of transactions, Bundlers instead of ordinary senders, an alt-mempool beside the real one, a singleton EntryPoint contract standing in for the protocol — plus staking and reputation rules to keep the whole thing safe from denial-of-service. It works. It is also a parallel universe. **EIP-7702** lets an EOA temporarily adopt contract code for a single transaction — a genuinely useful bridge, but still rooted in ECDSA authority; the EIP text itself says it "does not satisfy the PQ goals."
+
+**EIP-8141: Frame Transaction** (Buterin, lightclient, Lange, Weiss, et al.; [Draft, January 2026][eip]) takes the wall down instead of building around it. It adds a new transaction type — type `0x06` — and in the EIP's own words, frame transactions "realize the original vision of account abstraction: an account simply becomes an address with code."
+
+This post is about _why_ that design works, not a field-by-field tour of it. Where a detail matters for intuition, it's here; where it doesn't, [the EIP][eip] is a click away.
+
+## Every transaction already has three jobs
+
+Look at what a node does with an EIP-1559 transaction — `[nonce, fees, to, value, data, signature]` — when you send ETH today:
+
+1. **Validate.** Recover an address from the ECDSA signature. If it matches the account whose nonce this is, the transaction is authorized.
+2. **Pay.** Deduct gas from the recovered sender's balance.
+3. **Execute.** Make the single call to `to` with `value` and `data`.
+
+All three jobs happen inside every transaction you've ever sent — fused together, invisible, and decided by the protocol rather than by you. And the wall is exactly that fusion. Validation is hardcoded to ECDSA recovery, so your key is your account. Payment is hardcoded to the sender, so nobody can sponsor your gas. Execution is hardcoded to one call, so there's no batching.
+
+Account abstraction, reduced to one sentence, is: **make the three jobs programmable.** ERC-4337 makes them programmable inside a contract, at the cost of the parallel universe. EIP-8141 makes them programmable in the transaction format itself.
+
+## A transaction becomes a list of calls
+
+A frame transaction is a sequence of **frames** — typed, top-level contract calls, executed in order. Each frame has a **mode** that says which of the three jobs it performs:
+
+- **`VERIFY`** — validation. The protocol calls the frame read-only and asks: is this transaction authorized, and who pays?
+- **`SENDER`** — execution. The frame runs _as_ the sender's account; the only mode that can move ETH.
+- **`DEFAULT`** — housekeeping that doesn't fit the other two: deploying the account's code, a sponsor's post-transaction cleanup.
+
+Across the whole sequence, the protocol tracks exactly two facts: `sender_approved`, a boolean — has the sender authorized execution? — and `payer`, an address — who pays for gas? Both start empty. There is exactly one way to set them: a new opcode, `APPROVE`, which only the account a frame runs on can call. And there is one rule at the end: if `payer` was never set by the time the frames finish, the whole transaction is invalid.
+
+That is the entire protocol. Everything else — whose signature counts, which paymaster pays, what gets batched — is ordinary EVM code inside the frames.
+
+Here's what changes, job by job:
+
+| Job             | Today (EIP-1559)                   | Frame transaction                                       |
+| --------------- | ---------------------------------- | ------------------------------------------------------- |
+| Identify sender | recovered from the ECDSA signature | a declared `sender` field                                |
+| Validate        | ECDSA recovery, hardcoded          | a `VERIFY` frame — code on the sender's account decides  |
+| Pay for gas     | always the sender                  | whichever account's frame approves payment               |
+| Execute         | exactly one call                   | one or more `SENDER` frames                              |
+
+<img
+  src="/diagrams/frame-vs-1559.svg"
+  alt="Side-by-side comparison. Left: an EIP-1559 transaction as one fused blob — the signature is recovered to identify the sender, the sender's balance pays gas, and a single call executes; the three jobs (validate, pay, execute) are hardcoded and invisible. Right: a frame transaction — an explicit declared sender field plus an ordered list of frames, each frame labeled with its job: a VERIFY frame that validates and calls APPROVE, then SENDER frames that execute. The three jobs are unfused into visible, programmable slots."
+/>
+
+Concretely, "send `amount` wei to `destination`" becomes two frames:
+
+| #   | Caller      | Target       | Value  | Flags                         | Data  | Mode   |
+| --- | ----------- | ------------ | ------ | ----------------------------- | ----- | ------ |
+| 0   | ENTRY_POINT | Null(sender) | 0      | APPROVE_EXECUTION_AND_PAYMENT | empty | VERIFY |
+| 1   | Sender      | destination  | amount | APPROVE_SCOPE_NONE            | empty | SENDER |
+
+Frame 0 is the validation step, made visible: the protocol calls the sender's own account (that's what the empty target means), and the account answers by calling `APPROVE` with the combined scope _execution and payment_ — "this transaction is authorized, and I pay." That's the self-relay case, every transaction you've ever sent. Frame 1 is the execution step: run as the sender, move the ETH.
+
+Two objections should be forming. _My account is an EOA — it has no code to answer with._ Covered: when a frame targets an account with no code, the protocol runs **default code** — a built-in that does exactly what today's implicit validation does, check the transaction's attached secp256k1 signature against the sender and approve. An EOA gets frame transactions without deploying anything. _And a smart contract can't be a sender._ Also covered: the rule that blocks contracts from originating (EIP-3607) is explicitly suspended for frame transactions.
+
+So far this buys nothing — the same transfer, in more bytes. The payoff is that each job is now a slot you can fill differently.
+
+## Slot one: someone else pays
+
+The reason "authorize execution" and "commit to pay" are separate `APPROVE` scopes at all is sponsorship. An app that wants to onboard a user with zero ETH needs exactly this split: the _user_ authorizes what happens, the _app_ pays for it.
+
+As a frame transaction: the user's `VERIFY` frame approves execution only. Then a second `VERIFY` frame runs — targeting the _sponsor's_ contract this time — which inspects the transaction, decides it's willing to pay, and approves payment. Two accounts, two approvals, one transaction. Here's pay-with-ERC-20, where the sender holds no ETH and reimburses the sponsor in tokens:
+
+| #   | Caller      | Target       | Value | Flags              | Data                    | Mode    |
+| --- | ----------- | ------------ | ----- | ------------------ | ----------------------- | ------- |
+| 0   | ENTRY_POINT | Null(sender) | 0     | APPROVE_EXECUTION  | empty                   | VERIFY  |
+| 1   | ENTRY_POINT | sponsor      | 0     | APPROVE_PAYMENT    | sponsor data            | VERIFY  |
+| 2   | Sender      | ERC-20       | 0     | APPROVE_SCOPE_NONE | transfer(sponsor, fees) | SENDER  |
+| 3   | Sender      | target addr  | 0     | APPROVE_SCOPE_NONE | call data               | SENDER  |
+| 4   | ENTRY_POINT | sponsor      | 0     | APPROVE_SCOPE_NONE | post-op call            | DEFAULT |
+
+That's the ERC-4337 paymaster pattern with no EntryPoint contract and no Bundler — the sponsor's willingness to pay is just a contract call, in the same transaction it pays for.
+
+One ordering rule holds it together: **payment cannot be approved until execution has been.** You can't commit funds to a transaction nobody has authorized. A self-relayer does both in one `APPROVE`; a sponsor's payment frame only succeeds because the user's execution frame ran first. Reverse the order and the payment frame reverts.
+
+<img
+  src="/diagrams/frame-approve-states.svg"
+  alt="APPROVE state machine over two transaction-scoped booleans. Three reachable states: (sender_approved=false, payer unset) → (true, unset) → (true, set). APPROVE_EXECUTION moves sender_approved false→true (guard: resolved_target == tx.sender). APPROVE_PAYMENT sets payer but requires sender_approved==true first — the load-bearing ordering rule — so payment-before-execution is a dead path that reverts. APPROVE_EXECUTION_AND_PAYMENT does both atomically, the self-relay shortcut from the initial state straight to (true, set)."
+/>
+
+The sponsor takes on front-running risk — the user could drain their token balance between submission and inclusion. That's a property of the sponsorship relationship, not the protocol, but paymaster authors should design around it.
+
+(A brand-new smart account can even deploy itself in the same transaction: a `DEFAULT` frame calls a deterministic factory _before_ the validation frame, so the account has code by the time it's asked to validate. The [EIP][eip] covers the details and the front-running caveat.)
+
+## Slot two: bring your own signature
+
+The sender of a frame transaction is a **declared field**, not an address recovered from a signature. The transaction carries a separate list of signatures that validate it on the sender's behalf — and what counts as valid is decided by the code on the sender's account, not by the protocol.
+
+The protocol natively checks two schemes: secp256k1, and P256 — the curve used by passkeys and WebAuthn, which is what lets a phone's secure enclave be a wallet. Beyond those, a signature entry can carry _arbitrary bytes_ that your own `VERIFY` code interprets: a multisig's threshold of signatures, a scheme the protocol has never heard of.
+
+This is also the honest version of the post-quantum story. P256 is classical elliptic-curve cryptography — a quantum computer breaks it just as dead as secp256k1. What frame transactions actually buy is **architectural**: the format no longer _assumes_ ECDSA anywhere, so a real post-quantum scheme can later be added as just another scheme value, without redesigning the transaction. The off-ramp exists; nobody has driven it yet.
+
+## Slot three: several things, atomically
+
+Execution is "one or more `SENDER` frames," so batching is free: approve-then-swap, claim-then-restake, whatever — one transaction, no multicall contract.
+
+The classic hazard has a native answer too. Today, if you approve an ERC-20 allowance and the swap after it fails, the approval survives — a dangling allowance on your account. Frame transactions let you flag consecutive frames as an **atomic batch**: if any frame in the batch reverts, state rolls back to the start of the batch and the rest are skipped.
+
+| #   | Caller      | Target       | Value | Flags                         | Data                 | Mode   |
+| --- | ----------- | ------------ | ----- | ----------------------------- | -------------------- | ------ |
+| 0   | ENTRY_POINT | Null(sender) | 0     | APPROVE_EXECUTION_AND_PAYMENT | empty                | VERIFY |
+| 1   | Sender      | ERC-20       | 0     | ATOMIC_BATCH_FLAG             | approve(DEX, amount) | SENDER |
+| 2   | Sender      | DEX          | 0     | APPROVE_SCOPE_NONE            | swap(...)            | SENDER |
+
+If the swap reverts, the approval reverts with it. Receipts distinguish "failed" from "skipped because the batch failed," so tooling can tell what happened.
+
+## Why this one can ship
+
+Here's the question that killed native account abstraction proposals for years: if validation is arbitrary code, what stops an attacker from flooding the mempool with transactions whose validity all hinges on one storage slot — then flipping that slot and invalidating them all at once? Nodes would have burned real compute validating garbage, for free. ERC-4337 answers with staking and reputation for the parties involved. That works, but it's infrastructure — the thing 8141 is trying not to need.
+
+EIP-8141's answer is surgical. A node only needs to simulate a transaction _until `payer` is set_ — past that point, someone is committed to paying for whatever happens, so nothing after it needs policing. The EIP calls the frames up to that point the **validation prefix**, and the public mempool constrains only them: the prefix must match one of four recognized shapes (self-relay and sponsored, each with or without a deploy frame), stay within a fixed gas budget, and touch nothing volatile — no environment opcodes, no third-party state, essentially nothing but the sender's own account. Validation that can't depend on shared mutable state can't be mass-invalidated by it.
+
+Paymasters — whose entire job is to be one account that many transactions depend on — get two carve-outs: a **canonical paymaster** (recognized by exact code match, so nodes know it's mempool-safe and just track its solvency), and non-canonical ones, limited to one pending transaction at a time. Everything heavier that ERC-7562 handles with staking and reputation is simply not admitted to the public mempool — private channels can carry whatever they like.
+
+The result is the part of 8141 that most deserves the word "native": not just no EntryPoint contract, but no staking, no reputation, no alt-mempool. The [EIP][eip] specifies the prefix shapes and the banned-opcode list precisely.
+
+## What it costs
+
+Remarkably little. The EIP's own accounting puts a basic smart-account ETH transfer at **~139 bytes** — in its words, "not much larger than an EIP-1559 transaction; the extra overhead is mainly the need to specify the sender and the per-frame wrapper explicitly." Adding in-transaction account deployment costs ~126 bytes more; a full trustless pay-with-ERC-20 sponsor setup, ~147. And because frame data is raw calldata rather than ABI-encoded structs, it avoids the 32-byte-per-field overhead that bloats ERC-4337 UserOperations.
+
+## Where this stands
+
+**Status: Draft**, created January 2026, not scheduled for any fork. The canonical paymaster's code, aggregate signatures, and a mechanism for large post-quantum public keys are all explicitly future work. Active discussion is on the [Ethereum Magicians thread][forum].
+
+If this post did its job, you now know why each piece exists: frames because a transaction's three jobs should be explicit calls; `APPROVE` and its two facts because the protocol only needs to know _authorized?_ and _who pays?_; scopes because sponsorship splits those decisions across accounts; the validation prefix because programmable validation must not be mass-invalidatable. For the machinery — the six fields of a frame, the introspection opcodes that let a paymaster inspect what it's paying for, the gas schedule, the execution loop — [read the EIP][eip] with this map in hand.
+
+The one-line summary: a transaction becomes a list of typed calls, the protocol tracks two facts, and everything else — authentication, payment, batching — becomes code. If you're building wallets, paymasters, or account infrastructure, this is the shape to start designing against.
+
+## References
+
+- **EIP-8141 (this proposal)**: Buterin, V., lightclient, Lange, F., Weiss, Y., et al. (2026). "EIP-8141: Frame Transaction." [Draft]. [https://eips.ethereum.org/EIPS/eip-8141](https://eips.ethereum.org/EIPS/eip-8141) — discussion: [https://ethereum-magicians.org/t/frame-transaction/27617](https://ethereum-magicians.org/t/frame-transaction/27617)
+- **ERC-4337**: Forshtat, A., et al. "Account Abstraction via Entry Point Contract specification." [https://eips.ethereum.org/EIPS/eip-4337](https://eips.ethereum.org/EIPS/eip-4337)
+- **ERC-7562**: Olena, V., et al. "Account Abstraction Mempool Rules." [https://eips.ethereum.org/EIPS/eip-7562](https://eips.ethereum.org/EIPS/eip-7562)
+- **EIP-7702**: Buterin, V., et al. "Set EOA account code for one transaction." [https://eips.ethereum.org/EIPS/eip-7702](https://eips.ethereum.org/EIPS/eip-7702)
+- **EIP-3074**: Savage, A., et al. "AUTH and AUTHCALL opcodes." [https://eips.ethereum.org/EIPS/eip-3074](https://eips.ethereum.org/EIPS/eip-3074)
+- **EIP-3607**: Fromknecht, A., et al. "Reject transactions from senders with deployed code." [https://eips.ethereum.org/EIPS/eip-3607](https://eips.ethereum.org/EIPS/eip-3607) — suspended for frame transactions.
+
+[eip]: https://eips.ethereum.org/EIPS/eip-8141
+[forum]: https://ethereum-magicians.org/t/frame-transaction/27617

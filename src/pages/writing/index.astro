@@ -54,7 +54,7 @@ const posts = Object.entries(postModules)
           return (
             <>
               {showYear && (
-                <li class="text-sm font-medium text-neutral-400 dark:text-neutral-500">
+                <li class="font-mono text-sm font-medium text-neutral-500 dark:text-neutral-400">
                   {year}
                 </li>
               )}
@@ -72,11 +72,11 @@ const posts = Object.entries(postModules)
                   </p>
                   <div class="mt-2 flex flex-wrap items-center gap-2">
                     {post.frontmatter.tags?.map((tag) => (
-                      <span class="rounded border border-blue-200 px-1.5 py-0.5 text-xs text-blue-500 dark:border-blue-900 dark:text-blue-400">
+                      <span class="rounded border border-blue-200 px-1.5 py-0.5 font-mono text-xs text-blue-500 dark:border-blue-900 dark:text-blue-400">
                         {tag}
                       </span>
                     ))}
-                    <span class="text-sm text-neutral-400 dark:text-neutral-500">
+                    <span class="font-mono text-xs text-neutral-500 dark:text-neutral-400">
                       {date.toLocaleDateString("en-US", {
                         month: "short",
                         day: "numeric",

@@ -1,20 +1,32 @@
 ---
 import Link from "./icons/Link.astro";
 
+const postModules = import.meta.glob<{
+  frontmatter: {
+    title: string;
+    description: string;
+    pubDate: string;
+    externalUrl?: string;
+  };
+}>("../pages/writing/*.mdx", { eager: true });
+
+const recentPosts = Object.entries(postModules)
+  .map(([path, post]) => ({
+    ...post.frontmatter,
+    url:
+      post.frontmatter.externalUrl ||
+      path.replace(".mdx", "").replace("../pages", ""),
+  }))
+  .sort((a, b) => new Date(b.pubDate).valueOf() - new Date(a.pubDate).valueOf())
+  .slice(0, 3);
+
 const projects = [
   {
-    label: "zk-email-verify",
-    href: "github.com/zkemail/zk-email-verify",
-    role: "Core contributor @ ZkEmail",
+    label: "ProveKit",
+    href: "github.com/worldfnd/provekit",
+    role: "Core contributor @ World",
     description:
-      "Verify any text in any sent or received email, cryptographically — trusting only the sending mailserver.",
-  },
-  {
-    label: "zk-regex v2",
-    href: "github.com/zkemail/zk-regex",
-    role: "Author @ ZkEmail",
-    description:
-      "Regex-to-circuit compiler (Circom/Noir) with off-circuit NFA traversal and in-circuit proof.",
+      "Client-side zero-knowledge proving for World ID. Work spans witness solving, challenge soundness, recursive verification, and prover performance.",
   },
   {
     label: "WHIR",
@@ -24,22 +36,27 @@ const projects = [
       "Reed–Solomon proximity testing with super-fast verification. Added batch prove/verify and recursive verification support.",
   },
   {
-    label: "ProveKit",
-    href: "github.com/worldfnd/provekit",
-    role: "Contributor @ World",
-    description: "Client-side zero-knowledge proving.",
+    label: "zk-regex v2",
+    href: "github.com/zkemail/zk-regex",
+    role: "Author @ ZkEmail",
+    description:
+      "Regex-to-circuit compiler (Circom/Noir) with off-circuit NFA traversal and in-circuit proof.",
+  },
+  {
+    label: "Jolt",
+    href: "github.com/a16z/jolt",
+    role: "Contributor @ a16z crypto",
+    description:
+      "RISC-V zkVM. Wrote the migration spec for its Fiat-Shamir transcript to spongefish.",
   },
 ];
 
-const publications = [
-  {
-    title:
-      "Zero-Knowledge Proofs of Generalized Regular Expression Matching for Anonymized Email Verification",
-    venue: "PoPETs 2026, Issue 4",
-    status: "To appear",
-    href: "/publications",
-  },
-];
+const publication = {
+  title:
+    "Zero-Knowledge Proofs of Generalized Regular Expression Matching for Anonymized Email Verification",
+  venue: "PoPETs 2026(4) · pp. 740–771",
+  href: "/publications",
+};
 
 const socials = [
   {
@@ -66,32 +83,14 @@ const socials = [
 ---
 
 <main>
-  <section
-    class="animate-intro mt-8 opacity-0 [animation-delay:0.3s]"
-    aria-label="Latest"
-  >
-    <a
-      href="/publications"
-      class="exclude group inline-flex max-w-full items-center gap-x-2 rounded-full border border-blue-200 bg-blue-50/60 px-3 py-1 text-sm transition-colors hover:bg-blue-50 dark:border-blue-900/60 dark:bg-blue-950/30 dark:hover:bg-blue-950/60"
-    >
-      <span class="rounded-full bg-blue-500 px-1.5 py-0.5 text-[10px] font-medium tracking-wide text-white uppercase">
-        New
-      </span>
-      <span class="truncate text-neutral-700 dark:text-neutral-200">
-        ZK Regex paper accepted at PoPETs 2026
-      </span>
-      <span class="text-blue-500 transition-transform group-hover:translate-x-0.5">→</span>
-    </a>
-  </section>
-
   <section class="mt-10">
     <h2
-      class="animate-intro mb-3 font-medium opacity-0 [animation-delay:0.35s]"
+      class="animate-intro mb-3 font-medium opacity-0 [animation-delay:0.3s]"
     >
       <span class="text-blue-500">—</span> Featured Work
     </h2>
     <ul
-      class="animate-intro relative flex flex-col gap-y-4 opacity-0 [animation-delay:0.4s]"
+      class="animate-intro relative flex flex-col gap-y-4 opacity-0 [animation-delay:0.35s]"
     >
       {
         projects.map((project) => (
@@ -117,27 +116,42 @@ const socials = [
     </ul>
   </section>
 
-  <section class="animate-intro mt-12 opacity-0 [animation-delay:0.45s]">
+  <section class="animate-intro mt-12 opacity-0 [animation-delay:0.4s]">
     <h2 class="mb-3 font-medium">
       <span class="text-blue-500">—</span> Publications
     </h2>
+    <div class="transition-transform hover:translate-x-0.5">
+      <a href={publication.href} class="block w-fit leading-snug">
+        {publication.title}
+      </a>
+      <p class="mt-1 font-mono text-xs text-neutral-500 dark:text-neutral-400">
+        {publication.venue}
+      </p>
+    </div>
+  </section>
+
+  <section class="animate-intro mt-12 opacity-0 [animation-delay:0.45s]">
+    <h2 class="mb-3 flex items-baseline justify-between font-medium">
+      <span><span class="text-blue-500">—</span> Recent Writing</span>
+      <a
+        href="/writing"
+        class="exclude text-sm font-normal text-neutral-500 hover:text-blue-500 dark:text-neutral-400"
+        >All writing →</a
+      >
+    </h2>
     <ul class="flex flex-col gap-y-4">
       {
-        publications.map((pub) => (
+        recentPosts.map((post) => (
           <li class="transition-transform hover:translate-x-0.5">
-            <a
-              href={pub.href}
-              class="flex w-fit items-baseline gap-x-2"
-            >
-              <span class="leading-snug">{pub.title}</span>
+            <a href={post.url} class="flex w-fit items-baseline gap-x-2">
+              <span class="leading-snug">{post.title}</span>
             </a>
-            <p class="mt-1 text-sm text-neutral-500 dark:text-neutral-400">
-              <span class="italic">{pub.venue}</span>
-              {pub.status && (
-                <span class="ml-2 rounded border border-blue-200 px-1.5 py-0.5 text-xs text-blue-500 dark:border-blue-900 dark:text-blue-400">
-                  {pub.status}
-                </span>
-              )}
+            <p class="mt-0.5 font-mono text-xs text-neutral-500 dark:text-neutral-400">
+              {new Date(post.pubDate).toLocaleDateString("en-US", {
+                month: "short",
+                day: "numeric",
+                year: "numeric",
+              })}
             </p>
           </li>
         ))

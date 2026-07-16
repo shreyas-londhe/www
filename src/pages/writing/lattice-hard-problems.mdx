@@ -1,0 +1,262 @@
+---
+layout: ../../components/blog-post.astro
+title: "The Hard Problems Behind Lattice Cryptography"
+description: "A SNARK engineer's guide to SIS, LWE, module lattices, and the commitment scheme MatRiCT runs on — the foundation for reading lattice-based ZK papers"
+pubDate: "2026-06-10"
+tags: ["lattice-cryptography", "post-quantum", "commitments"]
+---
+
+## Why should a SNARK engineer care about lattices?
+
+If you've been living in the SNARK world, your cryptographic toolkit rests on one of two foundations: discrete-log and pairing assumptions (Pedersen, KZG, Groth16), or hash functions (FRI, STARKs, everything Merkle-shaped). Each has a gap.
+
+- **Discrete-log and pairings** give you tiny, perfectly homomorphic commitments with exact openings — and a quantum computer running [Shor's algorithm](https://en.wikipedia.org/wiki/Shor%27s_algorithm) breaks all of it.
+- **Hash-based** systems are plausibly post-quantum — but a hash commitment has no algebra. You can't add two Merkle roots and get a commitment to the sum.
+
+For most SNARK applications the second gap is survivable. But there's a family of protocols where additive homomorphism is the load-bearing wall: confidential transactions. In a RingCT-style protocol (the one [Monero runs](https://www.getmonero.org/resources/moneropedia/ringCT.html)), the balance check — "inputs minus outputs equals zero" — is literally a sum of commitments. Monero does this with Pedersen commitments and discrete-log sigma protocols, which means Monero's privacy is not post-quantum.
+
+Lattices are the third foundation: post-quantum assumptions _and_ additive homomorphism. The existence proof that this combination is practical is **MatRiCT** (Esgin, Zhao, Steinfeld, Liu, Liu — [CCS 2019](https://eprint.iacr.org/2019/1287)), a lattice-based RingCT protocol with 93–120 KB transactions — roughly two orders of magnitude smaller than the prior post-quantum proposal — and verification around 23 ms on a standard PC.
+
+So why isn't everyone reading these papers? Because the lattice literature has a reputation for being impenetrable. Here's my claim: the math is not deep — it's linear algebra mod $q$ — but the _bookkeeping_ is unfamiliar. Every object carries a "shortness" side condition. Commitment openings are approximate, scaled by mysterious "relaxation factors." Provers abort and retry. None of this exists in the dlog world, and papers spend zero words explaining why it exists, because for their audience it's ambient knowledge.
+
+This post is the bookkeeping manual for the static objects: the hard problems (SIS, LWE, and their module versions) and the commitment scheme that lattice ZK protocols run on. The dynamics — how you actually prove things about lattice commitments in zero-knowledge, why provers abort and retry, and where those relaxation factors come from — are a topic of their own, which I cover in a companion post on zero-knowledge proofs over lattices. The goal of _this_ one: by the end, you can read MatRiCT's preliminaries section line by line, and its commitment definitions without bouncing off.
+
+**Prerequisites.** Finite fields, linear algebra, and comfort with the general shape of commit-and-prove protocols. No lattice background. If you know what a Pedersen commitment is, the punchlines will land harder, but it's not required.
+
+### A glossary before we start
+
+Five pieces of notation appear constantly, both here and in every lattice paper you'll read:
+
+- **$q$** — an odd modulus. Crucially, $\mathbb{Z}_q$ is represented by _centered_ representatives $\left[-\frac{q-1}{2}, \frac{q-1}{2}\right]$, not $[0, q-1]$. This matters because "short" means "close to $0$", and that's only meaningful with centered representatives. MatRiCT uses $q = 2^{31} - 2^{18} + 2^3 + 1$, a 31-bit modulus.
+- **$[\beta]$** — the set of integers with absolute value at most $\beta$: $\{-\beta, \dots, \beta\}$. A vector "with coefficients in $[\beta]$" is what we mean by a **short vector**.
+- **$R$ and $R_q$** — the polynomial rings $\mathbb{Z}[X]/(X^d + 1)$ and $\mathbb{Z}_q[X]/(X^d + 1)$: polynomials of degree below $d$, with multiplication wrapping around via $X^d = -1$. MatRiCT uses $d = 64$; Kyber and Dilithium use $d = 256$. We'll build up to why these rings appear.
+- **$\|\cdot\|$, $\|\cdot\|_\infty$, $\|\cdot\|_1$** — the usual $\ell_2$, max, and sum-of-absolute-values norms, applied to a polynomial's coefficient vector. Norm bounds are the protagonist of this whole story, so papers are pedantic about which norm they mean.
+- **$\mathsf{HW}(f)$** — the Hamming weight of $f$'s coefficient vector: how many coefficients are non-zero.
+
+## What is a lattice (and why you'll mostly never see one)
+
+Start with the picture, because it's the one piece of geometry you'll lean on. Think of graph paper: a regular grid of dots. Now let yourself pick the two arrows that step you from one dot to the next — they don't have to be the usual "one right, one up" — and stamp that pattern out to infinity in every direction. The dots you land on form a **lattice**. The step-arrows are its **basis**.
+
+<img
+  src="/diagrams/lattice-hard-problems-basis-and-svp.svg"
+  alt="2D lattice as an infinite grid of points. A near-orthogonal basis (two short, roughly perpendicular vectors) and a skewed basis (two long, nearly parallel vectors) both generate the same point grid. The shortest nonzero lattice vector is highlighted, showing that finding it is easy from a good basis and hard from a skewed one."
+/>
+
+Formally that's "all integer combinations of basis vectors $B = (b_1, \dots, b_m)$, living in $\mathbb{Z}^m$" — but keep the graph-paper image, because it carries the two facts that drive everything:
+
+- **The same grid has many bases.** A nice basis uses short, near-perpendicular arrows. A nasty basis uses long, nearly-parallel ones that crawl across the grid at a shallow angle. Both stamp out the _identical_ set of dots — that's the two bases drawn above.
+- **Finding the dot nearest the origin is the hard problem.** Easy from a nice basis (just look). Brutal from a nasty one. And in a few hundred dimensions, where you can't look at anything, it's the bedrock lattice cryptography stands on. This is the _shortest vector problem_, and "given a bad basis, find a short vector" is the difficulty everything else inherits.
+
+Here's the orientation point for everything that follows: **once you leave 2D, you stop drawing grids and start working with matrices.** You'll reason about a random matrix, short vectors, and norms — never the grid itself.
+
+The lattices in crypto come from a matrix. Given $A \in \mathbb{Z}_q^{n \times m}$, the **$q$-ary lattice** is
+
+$$
+L_q^\perp(A) = \{ v \in \mathbb{Z}^m : Av \equiv 0 \pmod q \}.
+$$
+
+Read it as a question you already know how to ask: _which integer vectors does $A$ send to zero, mod $q$?_ It's the kernel of a random matrix. If you've worked with linear codes, it's exactly a parity-check description — $A$ is the parity-check matrix, and lattice points are the "codewords" that hash to zero.
+
+Two facts make this kernel cryptographically useful:
+
+- **Its short vectors are hard to find.** Every known algorithm, classical or quantum, takes $2^{\Omega(n+m)}$ time to find a genuinely short one. Polynomial-time algorithms (LLL and its BKZ descendants) only find _somewhat_ short vectors — length about $q^{n/(n+m)} \cdot \delta^{n+m}$, where the **root Hermite factor** $\delta$ is the security dial: smaller $\delta$ costs exponentially more work. Rule of thumb: $\delta = 1.01$ is reachable today, $\delta = 1.005$ maybe never. MatRiCT targets $\delta \approx 1.0045$, which the standard estimator puts at 128-bit post-quantum security.
+- **Random is as hard as worst-case.** Ajtai (for SIS) and Regev (for LWE) proved that solving these on _random_ matrices is as hard as solving certain lattice problems on _every_ lattice. No weak keys, no unlucky instances to stumble into — the reason the field trusts the assumptions at all.
+
+So the mental model: a random matrix $A$ defines a lattice you'll never look at, whose short vectors nobody can find. Everything after this is protocol design on top of that one fact.
+
+## SIS: finding short vectors, and why "short" is the entire game
+
+The whole problem fits in one sentence: someone hands you a random system of linear equations mod $q$ and asks for a _small_ solution.
+
+Everything hinges on that one word. Finding _a_ solution is trivial — it's the linear algebra you already know, Gaussian elimination in milliseconds. Finding a _small_ one, with every entry pinned near zero, is what nobody can do. That gap is the shortest-vector difficulty from the last section wearing different clothes.
+
+Here's the formal statement. **Short Integer Solution (SIS).** Given a uniformly random $A \leftarrow \mathbb{Z}_q^{n \times m}$, find vectors $s_1 \in [\beta]^m$, $s_2 \in [\beta]^n$, not both zero, with
+
+$$
+A s_1 + s_2 \equiv 0 \pmod q.
+$$
+
+(That's the $[A \,\|\, I_n]$ form from Lyubashevsky's tutorial; you'll also see the one-matrix form "find short $z$ with $Az = 0$", which is how MatRiCT writes it.)
+
+Three sanity checks, each of which teaches you something:
+
+- **Drop the norm bound and the problem is trivial.** Without $s_i \in [\beta]$, this is just "find a kernel vector of $A$" — the easy case above. The norm bound is the _only_ source of hardness. If you remember one thing from this article, make it this: in lattice crypto, hardness comes from shortness, and every design decision downstream is about preserving it.
+- **Too generous a bound is also trivial.** If $\beta = q/2$, every vector qualifies as "short" (remember, centered representatives), and you can satisfy the equation by just setting $s_2$ to whatever makes it balance. Hardness requires $\beta \ll q$.
+- **Too stingy a bound and no solution exists.** A counting argument (pigeonhole over the $q^n$ possible values of $As_1 + s_2$) shows a solution with coefficients up to $q^{n/(n+m)}$ always exists — but below a quarter of that threshold ($\beta < \tfrac{1}{4} q^{n/(n+m)}$), with overwhelming probability over $A$, there is _no_ solution at all. The problem is vacuously "hard" there. Real hardness lives in between: solutions exist but finding them takes exponential time, and the problem gets _harder_ as $\beta$ shrinks toward the threshold.
+
+A tiny example to make it concrete. Take $q = 17$, $n = 1$, $m = 2$, $A = [3 \;\; 5]$. The challenge: find short $(z_1, z_2, z_3)$ with $3 z_1 + 5 z_2 + z_3 \equiv 0 \pmod{17}$. The vector $(1, 2, 4)$ works: $3 + 10 + 4 = 17 \equiv 0$, with $\|z\|_\infty = 4$. The vector $(0, 0, 17)$ also "works" — but $17 \equiv 0$, so it's the trivial all-zeros solution in disguise. Vectors with coefficients on the order of $q$ are always available and always worthless; the game is staying far below $q$. At toy scale you can find $(1,2,4)$ by inspection. At $n, m$ in the hundreds with $\beta \ll q$, nobody can.
+
+**Why you care: SIS is a hash function.** Define $f_A(z) = Az \bmod q$, restricted to short inputs $z$. This function compresses (choose dimensions so the input space outnumbers $q^n$) and it is **collision-resistant**: if $f_A(x) = f_A(x')$ for short $x \neq x'$, then $A(x - x') = 0$ and $x - x'$ is a short non-zero kernel vector — exactly a SIS solution. So a collision-finder is a SIS-solver.
+
+This construction — Ajtai's hash function — is the binding half of every lattice commitment, and when we build the commitment scheme two sections from now, "binding" reduces to _exactly this subtraction argument_. Notice also a detail that will matter enormously once you get to the proofs: the collision gives a kernel vector of norm up to $2\beta$, twice the honest bound. Approximation slack enters the story at the very first step, and it compounds.
+
+## LWE: noisy linear equations
+
+If SIS is "find a small solution," LWE is its mirror image: _hide a secret by adding a little noise._
+
+Picture it. I pick a secret $s$ and show you $As$, a random matrix times that secret. That hides nothing — you recover $s$ by Gaussian elimination before lunch. So I rough it up: I add a tiny error to every entry and show you $As + e$ instead. Two things break at once. You can no longer recover $s$, because the noise wrecks the elimination. And you can't even tell I started from a secret at all: $As + e$ is indistinguishable from a vector I pulled out of thin air. That second claim is the one we build on.
+
+The formal version says exactly that. **Learning With Errors (LWE), decision form.** Distinguish
+
+$$
+(A, \; As + e) \quad \text{from} \quad (A, \; u),
+$$
+
+with $A \leftarrow \mathbb{Z}_q^{n \times m}$ and $u \leftarrow \mathbb{Z}_q^n$ uniform, and short random $s \leftarrow [\beta]^m$, $e \leftarrow [\beta]^n$.
+
+**The error term is the entire problem.** Strip $e$ and it's a solved exercise: $As$ sits in the column span of $A$, Gaussian elimination hands back $s$. Add it back and every known attack has to treat the system as a lattice problem instead — and we already know how that goes.
+
+Two practical notes that papers assume silently:
+
+- **The secret can be short too.** The original formulation draws $s$ uniformly, but drawing $s$ from the same small distribution as $e$ is a standard, equally hard variant — and it's what practical schemes do. MatRiCT's M-LWE definition samples both secret and error with coefficients in $\{-1, 0, 1\}$ (that's $B = 1$).
+- **The exact error distribution is negotiable.** Theory papers use rounded Gaussians (the worst-case reductions need them); practical schemes use uniform or binomial distributions. The hardness story survives the swap.
+
+**The duality picture.** This is the one picture worth carrying around before we touch a commitment. Fix $A$ and ask two questions about short vectors with bound $\beta$:
+
+- **SIS**: can you _find_ a short kernel vector? Gets **harder** as $\beta$ shrinks (shorter target, fewer candidates).
+- **LWE**: can you _detect_ a short-secret perturbation? Gets **harder** as $\beta$ grows (more noise, better masking).
+
+Plot both hardness curves against $\beta$ and they cross — at approximately $\beta = q^{n/(n+m)}$, the same pigeonhole threshold from the SIS section. One random matrix, two hardness curves leaning in opposite directions. A lattice commitment scheme needs _both_ assumptions at once (SIS for binding, LWE for hiding), so parameter setting is a balancing act on this picture: the noise must be small enough that SIS is hard at the resulting bound, and large enough that LWE is hard. When MatRiCT says it targets root Hermite factor $\approx 1.0045$ "for both M-LWE and M-SIS", this picture is what's being balanced.
+
+<img
+  src="/diagrams/lattice-hard-problems-sis-lwe-duality.svg"
+  alt="Hardness-versus-bound plot for a fixed matrix A. The SIS curve (find a short kernel vector) rises as the bound β shrinks; the LWE curve (detect a short-secret perturbation) rises as β grows. The two curves cross near β = q^(n/(n+m)), the pigeonhole threshold. A scheme must pick β where both are hard, so secure parameters live in the band around the crossing point."
+/>
+
+## From integers to polynomial rings
+
+Everything so far works. It's also too slow and too big to ship.
+
+**The problem is unstructured matrices.** A uniformly random $A \in \mathbb{Z}_q^{n \times m}$ at cryptographic dimensions is megabytes of data that both parties must store, and every operation is a dense matrix-vector multiplication. Discrete-log systems hide an entire group element behind 32 bytes; plain-LWE systems were never going to compete shipping raw random matrices around.
+
+**The fix: give the matrix structure.** Work over the polynomial ring
+
+$$
+R_q = \mathbb{Z}_q[X]/(X^d + 1)
+$$
+
+instead of over $\mathbb{Z}_q$. Elements are polynomials of degree below $d$ with coefficients in $\mathbb{Z}_q$. Addition is coefficient-wise. Multiplication is polynomial multiplication with the reduction rule $X^d = -1$: whenever a product term's exponent reaches $d$, it wraps around to degree $0$ with its sign flipped.
+
+A worked multiplication in $\mathbb{Z}[X]/(X^4 + 1)$, small enough to check in your head:
+
+$$
+(X^3 + 2X)(X^2 + 1) = X^5 + X^3 + 2X^3 + 2X = X^5 + 3X^3 + 2X,
+$$
+
+and now reduce $X^5 = X \cdot X^4 = -X$:
+
+$$
+= 3X^3 + 2X - X = 3X^3 + X.
+$$
+
+That sign-flipping wraparound is called **negacyclic** multiplication, and it's the only new mechanical skill the ring world demands.
+
+**Why this is not new math.** Multiplication by a fixed ring element $a$ is a linear map on coefficient vectors, so it _is_ a $d \times d$ integer matrix — a structured one, where each column is the previous column rotated down with a sign flip on wraparound. One ring element thus stands in for an entire $d \times d$ matrix block, but costs only $d$ coefficients to store and — because $X^d + 1$ supports FFT-style algorithms (the NTT, number-theoretic transform) — multiplies in quasi-linear rather than quadratic time. Ring-SIS is literally SIS where the big matrix $A$ is built from these structured blocks. That's the whole trick: same problems, same proofs, structured matrices, $d$-fold savings in size and far better speed.
+
+Why $X^d + 1$ specifically? Among all choice of reduction polynomial, $X^d \pm 1$ are the only ones where multiplication doesn't blow up coefficient sizes at all — the structured matrix has exactly the same largest-entry size as the original polynomial. Other polynomials inflate coefficients by constant or even exponential factors, eating directly into the noise budget that hardness depends on. (Hold the thought "multiplying things grows norms" — in the companion post on lattice proofs, multiplying a secret by a challenge polynomial is exactly how proofs work, and controlling that growth dictates the design of challenge spaces.)
+
+**Module = the interpolation knob.** Pure Ring-SIS/LWE replaces the entire matrix with a single row of ring elements. The **module** versions sit in between: small matrices _whose entries are ring elements_. This is what everyone actually deploys, because it decouples two decisions:
+
+- **Fix the ring once** — $d = 256$ for Kyber/Dilithium, $d = 64$ for MatRiCT — and hand-optimize its NTT arithmetic.
+- **Tune the matrix dimensions** for the security level you need, without touching the ring.
+
+<img
+  src="/diagrams/lattice-hard-problems-sis-ring-module.svg"
+  alt="Three-panel comparison of the same hard problem at three structure levels. Plain SIS: one huge dense integer matrix over Z_q. Ring-SIS: a single row of polynomials, each polynomial standing in for a structured d×d block. Module-SIS: a small matrix whose entries are ring elements, interpolating between the two. Size annotations show the ring and module forms store d-fold fewer numbers than the plain matrix."
+/>
+
+The definitions you'll meet in MatRiCT, verbatim in its notation:
+
+- **M-SIS$_{n,m,q,\beta_{SIS}}$**: given $A \leftarrow R_q^{n \times m}$, find $z \in R_q^m$ with $Az = 0$ over $R_q$ and $0 < \|z\| \le \beta_{SIS}$. (Note: $\ell_2$ norm here.)
+- **M-LWE$_{n,m,q,B}$**: with secret $s \leftarrow U_B^n$ (each coefficient in $[-B, B]$), distinguish $m$ samples $(a, \langle a, s \rangle + e)$ — with $a \leftarrow R_q^n$ uniform and $e \leftarrow U_B$ — from uniform pairs.
+
+These are not exotic assumptions. The "ML" in ML-KEM and ML-DSA — the NIST post-quantum standards formerly known as Kyber and Dilithium — stands for _Module Lattice_. MatRiCT runs on the same hardness foundation as the standards, instantiated as $(n, m) = (18, 38)$ over $\mathbb{Z}_q[X]/(X^{64} + 1)$.
+
+**The honesty footnote on structure.** Does the ring structure weaken security? Mostly no, with one documented caveat: for lattices corresponding to _ideals_ of these rings, there are known quantum algorithms that beat the generic ones for finding short vectors — but only in the regime where the ratio of modulus to noise is very large (the same large-gap regime where ordinary lattice problems also get easier). At the small $q/\beta$ ratios cryptographic schemes use, the best known attacks against module lattices are the same generic lattice-reduction algorithms as for unstructured lattices. It's a reminder that structured hardness is a separate, separately-studied assumption — and a reason designers keep $q/\beta$ small.
+
+## Hashed-Message Commitments: Ajtai's hash, upgraded
+
+Every lattice ZK protocol orbits one object: the commitment scheme. Before the algebra, the picture.
+
+A commitment is a digital sealed envelope. You lock a value inside and hand it over; later you can open it to prove what was in there. Two guarantees: you could never swap the contents after sealing (**binding**), and the sealed envelope leaks nothing about what's inside (**hiding**). Pedersen builds this from group exponents. The lattice version builds it from the two problems we just met — and you can nearly guess how.
+
+To seal, multiply your message and some fresh randomness by a wide public matrix. That's the whole construction: it's the SIS hash from two sections back, now with a slot for the message.
+
+- **Binding is SIS.** Two different openings of the same envelope would subtract to a short vector the matrix sends to zero — a collision, which is to say a SIS solution. Nobody can find one, so nobody can swap the contents.
+- **Hiding is LWE.** The randomness, pushed through the matrix, is an LWE sample: indistinguishable from uniform, so it blankets the message like static over a signal.
+
+MatRiCT calls this the **Hashed-Message Commitment (HMC)**. Here is the definition, verbatim modulo typography:
+
+- **Key generation.** Sample $A \leftarrow R_q^{n \times m}$ and $B \leftarrow R_q^{n \times v}$. The commitment key is $G = [A \,\|\, B]$, a random wide matrix over the ring.
+- **Commit.** To commit to a message vector $m \in R_q^v$, sample short randomness $r \leftarrow \{-B, \dots, B\}^{d \cdot m}$ and output
+
+$$
+\mathrm{Com}(m; r) = G \cdot (r, m) = A \cdot r + B \cdot m.
+$$
+
+(MatRiCT overloads the letter $B$: it's both the second key matrix and the coefficient bound on the randomness. They're unrelated; the bound here is the same $B = 1$ from the M-LWE definition above. I'm keeping the paper's notation so the mapping is one-to-one when you read it.)
+
+The output is $n$ ring elements, regardless of how long the message vector is — that's the "hashed-message" part. The message gets compressed by $B$; only the randomness needs to be short at commit time. Committing to a long vector costs the same commitment size as committing to a single bit. (MatRiCT exploits this hard: one commitment holds all 64 bits of a transaction amount, which is the opening move of its no-range-proof trick — but that's getting ahead of ourselves.)
+
+<img
+  src="/diagrams/lattice-hard-problems-hmc-commit.svg"
+  alt="Block diagram of the HMC commitment G·(r,m) = A·r + B·m. The key G = [A ‖ B] is a wide n×(m+v) matrix of ring elements: A (n×m) multiplies the short randomness r, B (n×v) multiplies the message m. The two products add to an n-ring-element output. Annotations mark r as short (the hiding mask via M-LWE) and the A·r term as the binding source via M-SIS."
+/>
+
+We sketched why hiding and binding hold; here is the precise version, both reductions hitting the same matrix:
+
+- **Hiding $\leftarrow$ M-LWE.** $A \cdot r$ is an M-LWE sample in disguise, hence indistinguishable from uniform — a uniform mask over $B \cdot m$. Note this is _computational_ hiding, weaker than Pedersen's perfect hiding.
+- **Binding $\leftarrow$ M-SIS.** MatRiCT's Lemma 2.3 makes the collision argument precise: binding holds if M-SIS$_{n, m+v, q, 2\gamma_{com}}$ is hard, where $\gamma_{com}$ bounds valid openings. Note the factor of 2 — subtracting two openings doubles the norm, so the assumption must hold at _twice_ the honest bound.
+
+If you're coming from the dlog world, the side-by-side with Pedersen:
+
+|                        | Pedersen $g^r h^m$          | HMC $A r + B m$                          |
+| ---------------------- | --------------------------- | ---------------------------------------- |
+| Binding from           | discrete log                | M-SIS (short kernel vectors)             |
+| Hiding                 | perfect                     | computational (M-LWE)                    |
+| Additively homomorphic | yes                         | yes                                      |
+| Opening                | exact: reveal $(m, r)$      | relaxed: $(y, m', r')$ with a norm bound |
+| Commitment size        | 1 group element (~32 bytes) | $n$ ring elements (KB-scale)             |
+| Post-quantum           | no (Shor)                   | plausibly yes                            |
+
+Additive homomorphism — the property this whole detour was for — is immediate: $\mathrm{Com}(m_1; r_1) + \mathrm{Com}(m_2; r_2) = \mathrm{Com}(m_1 + m_2; r_1 + r_2)$, because everything is linear. The price relative to Pedersen is size, computational (not perfect) hiding, and one more thing — the strangest row in that table.
+
+## The definition that looks broken
+
+Here is MatRiCT's opening algorithm, word for word. To open a commitment $C$, you present a triple $(y, m', r')$, and the verifier checks:
+
+$$
+\mathrm{Com}(m'; r') = y \cdot C \quad \text{and} \quad \|(r', m')\| \le \gamma_{com}.
+$$
+
+Read that twice. The check is not "this opens $C$." It's "this opens **$y$ times $C$**" — for a so-called **relaxation factor** $y \in R_q$ that the _opener supplies_. The honest committer will only ever produce $y = 1$. The definition deliberately accepts more.
+
+Both deviations from Pedersen-style opening are visible now:
+
+- The opening is **norm-bounded** ($\gamma_{com}$, which is larger than the norm of honestly sampled randomness), and binding is only guaranteed against M-SIS at $2\gamma_{com}$ — approximate openings, with slack.
+- The opening is **scaled** by an adversarially chosen $y$, and the binding guarantee in Lemma 2.3 is explicitly stated "with respect to the same relaxation factor $y$": no one can produce two different messages opening the same $C$ _under the same $y$_.
+
+The paper's entire justification is one sentence: "this is required for efficient lattice-based zero-knowledge proofs." If you've never seen a lattice ZK proof, that sentence is a brick wall — the definition looks like it's accepting forgeries on purpose, and you have no way to evaluate whether the protocol built on top is sound.
+
+It isn't accepting forgeries, and there's a precise, mechanical reason the relaxation factor exists: it's the artifact of how knowledge is _extracted_ from a lattice proof-of-opening. When a sigma-protocol-style proof over a lattice commitment gets rewound to extract a witness, what falls out of the algebra is not an opening of $C$ but an opening of $\bar{c} \cdot C$, where $\bar{c}$ is a difference of two challenges (or, in MatRiCT's general case, a product of several such differences) — and rather than fight this, the definitions absorb it. That extraction story, the abort-and-retry loop that protects the secret's distribution, and the challenge-space engineering that keeps everything short — that's the companion post on zero-knowledge proofs over lattices.
+
+## Where we stand
+
+What you can now hold in your head when a lattice paper starts throwing notation:
+
+1. **One random matrix, two hard problems.** SIS: find a short kernel vector (harder as the bound shrinks). LWE: detect a short-secret perturbation (harder as the noise grows). Their curves cross, and schemes are parameterized at the balance point.
+2. **Shortness is the entire game.** Strip any norm bound from any lattice statement and it collapses to Gaussian elimination. Every weird design choice you'll meet exists to create, preserve, or bound the shortness of something.
+3. **Rings and modules are an engineering refit, not new philosophy.** Same problems over structured matrices; fix the ring, tune the module dimensions. The NIST standards and MatRiCT run on the same M-SIS/M-LWE foundation.
+4. **The commitment scheme is Ajtai's hash with a message slot.** Hiding from LWE, binding from SIS-collision-resistance, homomorphism from linearity — and KB-scale sizes instead of 32 bytes.
+5. **Openings are approximate and scaled, on purpose.** Norm slack ($\gamma_{com}$, and $2\gamma_{com}$ for binding) and the relaxation factor $y$ are extraction artifacts, not sloppiness. When a lattice definition looks broken, the missing context is almost always "this is what falls out of the soundness argument."
+
+The companion post builds the proofs: why Schnorr doesn't port to lattices, rejection sampling and Fiat–Shamir with aborts, challenge-space design, and the moment the relaxation factor is born during extraction — then a decoder ring mapping every object in MatRiCT's protocol back to this foundation.
+
+## References
+
+- **MatRiCT**: Esgin, M. F., Zhao, R. K., Steinfeld, R., Liu, J. K., Liu, D. (2019). "MatRiCT: Efficient, Scalable and Post-Quantum Blockchain Confidential Transactions Protocol." CCS 2019. [https://eprint.iacr.org/2019/1287](https://eprint.iacr.org/2019/1287)
+- **Basic Lattice Cryptography**: Lyubashevsky, V. "Basic Lattice Cryptography: The concepts behind Kyber (ML-KEM) and Dilithium (ML-DSA)." [https://eprint.iacr.org/2024/1287](https://eprint.iacr.org/2024/1287) — the single best on-ramp; this article's SIS/LWE treatment follows its Sections 2–4
+- **A Decade of Lattice Cryptography**: Peikert, C. (2016). [https://eprint.iacr.org/2015/939](https://eprint.iacr.org/2015/939) — the comprehensive survey, including the worst-case hardness story
+- **Worst-case reductions**: Ajtai, M. (1996). "Generating Hard Instances of Lattice Problems" (SIS); Regev, O. (2009). "On Lattices, Learning with Errors, Random Linear Codes, and Cryptography" (LWE). [https://cims.nyu.edu/~regev/papers/qcrypto.pdf](https://cims.nyu.edu/~regev/papers/qcrypto.pdf)
+- **Module lattices**: Langlois, A., Stehlé, D. (2015). "Worst-case to average-case reductions for module lattices." [https://eprint.iacr.org/2012/090](https://eprint.iacr.org/2012/090)
+- **RingCT**: Noether, S. (2015). "Ring Signature Confidential Transactions for Monero." [https://eprint.iacr.org/2015/1098](https://eprint.iacr.org/2015/1098)
