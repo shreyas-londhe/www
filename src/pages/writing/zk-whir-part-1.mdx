@@ -6,6 +6,8 @@ pubDate: "2026-05-30"
 tags: ["zero-knowledge", "snarks", "iops", "whir"]
 ---
 
+import ProtocolStepper from "../../components/protocol-stepper.astro";
+
 ## What problem are we solving?
 
 If you've followed the code-agnostic IOP line — [WHIR](/writing/whir), [Ligerito](https://eprint.iacr.org/2025/1187), the Blaze family — you've gotten fast, succinct, post-quantum proximity testing for "constrained interleaved linear codes." What you have _not_ gotten is **privacy**.
@@ -33,11 +35,18 @@ This article is **Part 1** of two. We build the foundations: what a zero-knowled
 
 ## Tensoring vs. interleaving
 
-Code-agnostic protocols need _some_ structure to hang their tricks on, and there are two canonical ways to manufacture it from a base code: tensoring and interleaving. They are sister operations, both linear-time-prover-compatible, with very different tradeoffs.
+Code-agnostic protocols need _some_ structure to hang their tricks on, and there are two canonical ways to manufacture it from a base code: tensoring and interleaving. Sister operations, very different bills. The bill is paid in two numbers, so fix them first.
 
-**A concrete picture.** Pin a tiny base code $\mathcal C \subseteq \Sigma^4$ — block length 4, alphabet $\Sigma$, codewords like $v = [v(1), v(2), v(3), v(4)]$. Now let's apply both operations to $\mathcal C$ and watch the shapes.
+**The base code and its two numbers.** Pin $\mathcal C \subseteq \Sigma^4$ — block length $n = 4$, dimension $k = 2$ (two message symbols in, four out), minimum distance $d = 3$. Reed–Solomon over any $\mathbb F$ with four evaluation points does exactly this. The two numbers a proximity test cares about:
 
-**Tensoring** with $K = 3$. The product code $\mathcal C \otimes \mathcal C$ takes a $4 \times 4$ matrix whose every row _and_ every column is a codeword of $\mathcal C$. A toy element looks like:
+- **Rate** $\rho = k/n = 1/2$. How much of the codeword is payload. Lower rate = more redundancy = longer codeword per message symbol = more prover work and a bigger oracle.
+- **Relative distance** $\delta = d/n = 3/4$. How far apart codewords sit. This is what soundness is bought with: a word that isn't a codeword must disagree with the nearest one in a $\delta$-ish fraction of positions, so random spot checks catch it.
+
+These normally trade off — Singleton says $\rho + \delta \leq 1 + 1/n$, and RS meets it. Now apply both operations and watch what happens to $(\rho, \delta)$.
+
+### Tensoring: pay on both axes
+
+$\mathcal C \otimes \mathcal C$ is the set of $4 \times 4$ matrices whose every row _and_ every column is a codeword of $\mathcal C$:
 
 $$
 \begin{bmatrix}
@@ -48,27 +57,52 @@ v_4(1) & v_4(2) & v_4(3) & v_4(4)
 \end{bmatrix}
 $$
 
-— each row $v_i \in \mathcal C$ _and_ each column (read top-to-bottom) also in $\mathcal C$. Shape is 2D, alphabet still $\Sigma$, but rate and distance both shrink (squared).
+**How you build one.** Start with a $2 \times 2$ block of message symbols. Encode each of its 2 rows with $\mathcal C$ → a $2 \times 4$ array. Then encode each of the 4 columns with $\mathcal C$ → the full $4 \times 4$. Columns are codewords by construction. Rows still are too: column-encoding applies one fixed linear map down each column, so every output row is a fixed linear combination of the two input rows, and $\mathcal C$ is linear.
 
-**Interleaving** with $K = 3$. The $3$-interleaving $\mathcal C^{\equiv 3} \subseteq (\Sigma^3)^4$ stacks _three_ codewords $v_1, v_2, v_3 \in \mathcal C$ side by side. Read along the columns:
+**Why rate squares.** Read the shapes off that construction: $k^2 = 4$ message symbols went in, $n^2 = 16$ symbols came out. Rate $= k^2/n^2 = \rho^2 = 1/4$.
+
+**Why distance squares.** Take any nonzero $M \in \mathcal C \otimes \mathcal C$. Some column of it is nonzero — and that column is a nonzero codeword of $\mathcal C$, so it has $\geq d$ nonzero entries. Each of those entries sits in a distinct row, so $\geq d$ rows of $M$ are nonzero. Each such row is itself a nonzero codeword, contributing $\geq d$ nonzero entries. Total $\geq d^2 = 9$ nonzero entries out of $n^2 = 16$. Relative distance $\delta^2 = 9/16$, down from $3/4$. Tight, too — the outer product $v \cdot w^\top$ of two minimum-weight codewords hits exactly $d^2$.
+
+**The catch:** those are two _independent_ losses, not a trade. $\rho + \delta$ went from $5/4$ down to $13/16 < 1$ — the tensor code is strictly inside the Singleton bound now. Concretely: at block length 16 and dimension 4, a plain RS code gets $\delta = 13/16$. The tensor code gets $9/16$ at the same rate. You paid a longer codeword _and_ handed the adversary more room, for structure.
+
+### Interleaving: pay in alphabet
+
+The $3$-interleaving $\mathcal C^{\equiv 3} \subseteq (\Sigma^3)^4$ stacks _three_ codewords $v_1, v_2, v_3 \in \mathcal C$ and reads them column-wise:
 
 $$
 u \;=\; \big[\,(v_1(1), v_2(1), v_3(1)),\; (v_1(2), v_2(2), v_3(2)),\; (v_1(3), v_2(3), v_3(3)),\; (v_1(4), v_2(4), v_3(4))\,\big].
 $$
 
-Length-4 word, but each "letter" is now a triple over $\Sigma$ — alphabet blown up from $\Sigma$ to $\Sigma^3$. Rate and distance _unchanged_; you just have more codewords of $\mathcal C$ traveling in parallel.
+Length-4 word, but each "letter" is now a triple over $\Sigma$. Nothing was combined — three codewords travel in parallel and a "position" means all three at once.
+
+**Why rate is unchanged.** $3k = 6$ message symbols over $\Sigma$ in, $3n = 12$ out. Rate $= 3k/3n = \rho = 1/2$. Interleaving replicates the encoder; replication doesn't change the payload fraction.
+
+**Why relative distance is unchanged.** A position of $u$ is nonzero iff _any_ of the three stacked codewords is nonzero there. If $u \neq 0$ then some $v_i \neq 0$, and that $v_i$ alone already forces $\geq d = 3$ nonzero positions. So $d(\mathcal C^{\equiv 3}) \geq d$ — and taking $v_1$ minimum-weight with $v_2 = v_3 = 0$ shows it's exactly $d$. Block length is still 4, so $\delta = 3/4$, untouched.
+
+**The price is the alphabet.** $\Sigma \to \Sigma^3$, and in general $\Sigma \to \Sigma^K$. One query to an interleaved codeword returns $K$ base symbols, whether or not you wanted them — so a $q$-query test costs $qK$ field elements. That's what "precludes query-optimal IOPs" means: you cannot get the per-query cost below $K$.
 
 <img
   src="/diagrams/zk-whir-tensor-vs-interleave.svg"
   alt="Tensor C⊗C as a 4x4 matrix with rows and columns both in C, alongside the 3-interleaving C^≡3 as four length-3 column tuples stacked from three codewords v1, v2, v3 in C, showing the alphabet inflate from Σ to Σ^3 while block length stays 4."
 />
 
-Two consequences fall straight out:
+### Side by side
 
-- **Tensoring** opens up local testability and tensor sumchecks — there's structure on both axes. This is the world [TensorSwitch](/writing/tensorswitch-part-1) lives in. Cost: rate and distance both shrink (squared); encoding is slower; alphabet stays small but proofs get tricky.
-- **Interleaving** preserves rate and distance, encoding efficiency improves (and works in small space), and crucially this works for _every_ code. Price: alphabet inflates from $\Sigma$ to $\Sigma^K$, which precludes query-optimal IOPs.
+|                   | $\mathcal C$ (base) | $\mathcal C \otimes \mathcal C$ | $\mathcal C^{\equiv 3}$       |
+| ----------------- | ------------------- | ------------------------------- | ----------------------------- |
+| Block length      | $4$                 | $16$                            | $4$                           |
+| Alphabet          | $\Sigma$            | $\Sigma$                        | $\Sigma^3$                    |
+| Rate              | $1/2$               | $1/4$ $(\rho^2)$                | $1/2$ $(\rho)$                |
+| Relative distance | $3/4$               | $9/16$ $(\delta^2)$             | $3/4$ $(\delta)$              |
+| Buys you          | —                   | structure on two axes           | parallel claims, one position |
+| Costs you         | —                   | rate _and_ distance             | $K\times$ alphabet            |
 
-The WHIR/Ligerito family lives in the interleaving world, and so does this paper. "Works for every code" is exactly the code-agnostic promise we want to keep.
+The two consequences that matter downstream:
+
+- **Tensoring** opens up local testability and tensor sumchecks — there is structure on both axes to interrogate. This is the world [TensorSwitch](/writing/tensorswitch-part-1) lives in. But the base code has to be good enough to survive squaring, and encoding is slower ($n + k$ encoder calls instead of one).
+- **Interleaving** leaves $(\rho, \delta)$ alone, so it works for _every_ code with no parameter slack required. Encoding is $K$ independent calls — embarrassingly parallel, and streamable in small space since you never hold more than one base codeword.
+
+The WHIR/Ligerito family lives in the interleaving world, and so does this paper. "Works for every code" is exactly the code-agnostic promise we want to keep — and the alphabet blowup, which looks like pure cost here, turns out to be a soundness lever later: the $K$ symbols a query returns share a position, and that correlation is what keeps the list-decoding union bound from exploding, in §"The HVZK sumcheck reduction".
 
 ## Zero-knowledge encodings: the foundational object
 
@@ -100,11 +134,80 @@ Since $r$ is uniform over $\mathbb F$ and $x_i$ is a fixed nonzero scalar, $r \c
 
 Two coordinates is more interesting, because $r$ links them: $p(x_i) - p(x_j) = r \cdot (x_i - x_j)$. The verifier can subtract them to recover $r$, then back out $m$. So $t = 1$ is the budget with this small encoding.
 
-### Scaling up
+### Scaling up: hiding $t$ coordinates
 
-Want $t$ hidden coordinates instead of one? Spend more randomness. Append $r$ fresh random field elements $\boldsymbol r$ to the message coefficients $\boldsymbol m$ and encode the resulting degree-$(\ell + r - 1)$ polynomial. Any $t \leq r$ coordinates of the codeword are then **jointly uniform** over $\mathbb F^t$: the random coefficients evaluated at $t \leq r$ distinct points form an invertible Vandermonde system, and the message contribution is just a constant shift the noise swallows.
+Want $t$ hidden coordinates instead of one? Spend $t$ coins. Take $r \geq t$ fresh random field elements $\boldsymbol r$, stack them on top of the message coefficients $\boldsymbol m$, and encode the whole thing:
 
-**Perfect $t$-query zero-knowledge for any $t \leq r$**, at the cost of $r$ extra symbols in the codeword. The randomness ate the leak.
+$$
+p(X) \;=\; \underbrace{\sum_{j=0}^{\ell-1} m_j X^j}_{p_{\boldsymbol m}(X)} \;+\; X^{\ell} \cdot \underbrace{\sum_{j=0}^{r-1} r_j X^{j}}_{\text{noise}},
+$$
+
+degree $\ell + r - 1$, evaluated at distinct nonzero $x_1, \dots, x_n$. The one-coordinate example was this with $\ell = r = 1$.
+
+**The counting, first.** $p$ has $\ell + r$ coefficients, so $\ell + r$ evaluations determine it outright — and then $\boldsymbol m$ is yours. That budget splits cleanly: the $r$ coins absorb the first $r$ reads, and the remaining $\ell$ are what pin down the $\ell$ message coefficients. So $t \leq r$ ought to be free and $t > r$ ought to leak. The rest of this section makes that exact.
+
+What we have to show is that for any query set $S$ of size $t$, the tuple $(p(x_i))_{i \in S}$ is uniform over $\mathbb F^t$ **jointly** — not coordinate-by-coordinate, since two individually-uniform values can still satisfy a relation that pins down $\boldsymbol m$, which is how the $\ell = r = 1$ encoding died at two queries.
+
+**Reading is affine in the coins.** Fix $\boldsymbol m$ and expand a single read, multiplying the $X^{\ell}$ through:
+
+$$
+p(x_i) \;=\; p_{\boldsymbol m}(x_i) \;+\; r_0\,x_i^{\ell} \;+\; r_1\,x_i^{\ell+1} \;+\; \cdots \;+\; r_{r-1}\,x_i^{\ell + r - 1}.
+$$
+
+Read that as: **a constant, plus a fixed row of $r$ numbers dotted with the coin vector.** The row belongs to the query — it's $(x_i^{\ell}, x_i^{\ell+1}, \dots, x_i^{\ell+r-1})$, computable by anyone who knows $x_i$. Now write one such row per queried position and stack them. That stacking is all "collect over $S$" meant, and it turns the $t$ reads into a single matrix equation:
+
+$$
+\underbrace{\begin{pmatrix} p(x_{i_1}) \\ \vdots \\ p(x_{i_t}) \end{pmatrix}}_{\text{what the verifier sees}}
+\;=\;
+\underbrace{\begin{pmatrix} p_{\boldsymbol m}(x_{i_1}) \\ \vdots \\ p_{\boldsymbol m}(x_{i_t}) \end{pmatrix}}_{\text{depends only on } \boldsymbol m}
+\;+\;
+\underbrace{\begin{pmatrix}
+x_{i_1}^{\ell} & x_{i_1}^{\ell+1} & \cdots & x_{i_1}^{\ell+r-1} \\
+\vdots & \vdots & & \vdots \\
+x_{i_t}^{\ell} & x_{i_t}^{\ell+1} & \cdots & x_{i_t}^{\ell+r-1}
+\end{pmatrix}}_{M,\ \ t \times r}
+\underbrace{\begin{pmatrix} r_0 \\ \vdots \\ r_{r-1} \end{pmatrix}}_{\text{the coins}}
+$$
+
+**One row per query, one column per coin** — so $M$ is $t \times r$ by construction, and entry $(i,j)$ says how much coin $j$ moves read $i$. The worked example below is literally this: $\ell = 1$, $r = 2$, queries at $x = 1, 2$ give rows $(1^1, 1^2) = (1,1)$ and $(2^1, 2^2) = (2,4)$.
+
+**Where rank comes in.** As $\boldsymbol r$ ranges over all of $\mathbb F^r$, the product $M\boldsymbol r$ ranges over exactly the **span of $M$'s columns**, and the $\boldsymbol m$-term only shifts that span bodily. So the reads fill $\mathbb F^t$ precisely when those columns span $\mathbb F^t$ — which is what $\mathrm{rank}(M) = t$ means. Two ceilings follow immediately, and they're the whole story:
+
+$$
+\mathrm{rank}(M) \;\leq\; \min(t, r)
+$$
+
+— at most $r$, because $r$ vectors can't span more than $r$ dimensions; at most $t$, because the span sits inside $\mathbb F^t$.
+
+- **$t > r$: deficient, always.** $\mathrm{rank}(M) \leq r < t$, so the image is a _proper_ subspace of $\mathbb F^t$. You cannot span a $t$-dimensional space with $r < t$ vectors, and no choice of code or evaluation points changes that.
+- **$t \leq r$: the ceiling is $t$, and $M$ reaches it — but only because of _which_ numbers are in it.** That is the one place the code earns its keep, and it's what Vandermonde means.
+
+**Vandermonde, in one line.** A Vandermonde matrix has geometric progressions for rows, $(1, x_i, x_i^2, \dots)$, and with **distinct** $x_i$ a square one is invertible — a fact you already know in polynomial clothing, since a nonzero polynomial of degree $< t$ cannot vanish at $t$ distinct points. Our $M$ is exactly that, row $i$ scaled by the nonzero $x_i^{\ell}$. So for $t \leq r$ its leftmost $t \times t$ block is an invertible Vandermonde, the rows are independent, and the rank hits $t$.
+
+Full rank is the property with teeth: **every** $t$-tuple the verifier might read is produced by some coin vector, for **every** message. Uniform coins through a surjection stay uniform, and the $\boldsymbol m$-shift doesn't disturb that — so the reads are uniform over $\mathbb F^t$ whatever $\boldsymbol m$ is, and the simulator just samples $t$ uniform field elements. **Perfect $t$-query zero-knowledge, $\zeta = 0$.**
+
+**Both cases on one example.** Take $\ell = 1$, $r = 2$, so $p(X) = m + r_0X + r_1X^2$, over any $\mathbb F$ with $\mathsf{char}\,\mathbb F > 3$. Querying $x = 1, 2$ is $t = 2 \leq r$, and $M$ is the $2 \times 2$ block from above:
+
+$$
+\begin{pmatrix} 1 & 1 \\ 2 & 4 \end{pmatrix}\begin{pmatrix} r_0 \\ r_1 \end{pmatrix} = \begin{pmatrix} y_1 - m \\ y_2 - m \end{pmatrix}, \qquad \det = 2 \neq 0.
+$$
+
+Invertible, so whatever target $(y_1, y_2)$ you name and whatever $m$ is, exactly one coin pair hits it — the image is all of $\mathbb F^2$, and the message only relabels which coins get you there. Now add $x = 3$, making $t = 3 > r$, and take $\boldsymbol c = (3, -3, 1)$:
+
+$$
+3\,p(1) - 3\,p(2) + p(3) \;=\; (3-3+1)\,m \;+\; (3-6+3)\,r_0 \;+\; (3-12+9)\,r_1 \;=\; m.
+$$
+
+Both coins cancel and the message falls out in the clear. Those weights are the Lagrange coefficients for interpolating back to $X = 0$, and $p(0) = m$.
+
+Such a $\boldsymbol c$ exists whenever $\mathrm{rank}(M) < t$ — a proper subspace is cut out by a linear relation, so some nonzero $\boldsymbol c$ kills every column of $M$ and leaves $\sum_i c_i\,p(x_i) = \sum_i c_i\,p_{\boldsymbol m}(x_i)$, computable from what was read. The reachable tuples form a coset of $M$'s column span, the message picks _which_ coset, and $\boldsymbol c$ reads off which one you're on.
+
+<img
+  src="/diagrams/zk-whir-zk-encoding-rank.svg"
+  alt="Two panels contrasting the rank of the map from coin space to read coordinates, under the header 'the reachable tuples form a subspace of dimension rank(M) ≤ min(t, r) — that one inequality decides both cases'. Left panel, t ≤ r: a box labeled coin space F^r has two arrows leaving it, one blue for message m and one red for message m′, both labeled rank = t (Vandermonde), both landing on a fully shaded square labeled F^t — what the verifier reads, annotated 'every point reachable, image = all of F^t'. Caption: both maps are surjective so both views are uniform on F^t and the verifier cannot tell m from m′; the simulator samples t uniform field elements. Right panel, t > r: the same coin space box, arrows labeled rank ≤ r < t (forced by counting), landing inside a mostly empty square labeled F^t — too big to cover, where the image is two thin parallel shaded strips, blue labeled m and red labeled m′. Caption: a nonzero c kills the coin part leaving Σ c_i p(x_i) = Σ c_i p_m(x_i), so the verifier learns which coset it is on — a linear functional of m."
+/>
+
+**The cost.** The codeword now carries $\ell + r$ coefficients, so you either add $r$ evaluation points to hold the rate fixed or keep $n$ and give up relative distance. Either way you pay $r$ symbols — but $r$ only has to cover the verifier's _total_ query budget, which grows with the security parameter and polylogarithmically in $\ell$, never linearly. So $r/\ell \to 0$, and that is one of the places the $1 + o(1)$ headline comes from.
 
 ### The abstract object
 
@@ -186,7 +289,13 @@ That's a one-time pad on $\mu$. From the verifier's view $\mu$ is a uniform fiel
 
 **Why the verifier can't unmask.** Reasonable worry: the verifier has oracle access to the mask codewords $\xi_i$. Could it just query them and reconstruct $\langle \boldsymbol \xi_i, \boldsymbol u_i \rangle$? No — and this is precisely why $\mathcal C_{\mathsf{zk}}$ is itself a ZK code. The same Vandermonde-style argument from §"Zero-knowledge encodings" applies: any $\leq t_{\mathsf{zk}}$ coordinates of $\xi_i$ are uniform over $\Sigma_{\mathsf{zk}}^{t_{\mathsf{zk}}}$ given only their positions, so the mask message $\boldsymbol \xi_i$ stays hidden behind the encoding the same way $\boldsymbol m$ stays hidden behind $f$. The ZK encoding on the mask side closes the loop.
 
-Putting both modifications together gives the relation we'll work with for the rest of this article:
+Putting both modifications together gives the relation we'll use for the rest of the article. Its data splits three ways — the standard IOR shape, made precise in §"IORs, briefly":
+
+| Slot | Symbol | Who sees it | What's in it here |
+| --- | --- | --- | --- |
+| Explicit instance | $\mathsf{x}$ | verifier, in the clear | target $\mu$, state $\mathsf{st}$, mask queries $(\boldsymbol u_i)$ |
+| Implicit instance | $\mathsf{y}$ | verifier, as oracles | main codeword $f$, mask codewords $(\xi_i)$ |
+| Witness | $\mathsf{w}$ | prover only | the messages and coins behind those codewords |
 
 $$
 \mathcal R_{\mathcal C, \mathcal C_{\mathsf{zk}}, \mathsf{sl}} \;:=\; \left\{
@@ -204,16 +313,9 @@ $$
 \right\}.
 $$
 
-This is the **committed sumcheck relation**. Three things to name:
+Data on the left, conditions on the right: $f$ is the **main oracle**, the $\xi_i$ are **mask oracles**, both honest encodings, and the last line is the **joint constraint**.
 
-- $f$ is the **main oracle** — the codeword encoding the witness message.
-- $(\xi_i)_{i \in [n]}$ are **mask oracles** — small codewords that exist purely to hide the constraint.
-- The last line is the **joint constraint** — a single succinct linear relation that ties the main message and the mask messages together.
-
-<img
-  src="/diagrams/zk-whir-committed-relation.svg"
-  alt="Structure of the committed sumcheck relation: main oracle f at top (large box, labeled Enc_C(m, r)) and n mask oracles ξ_1, ..., ξ_n at left (smaller boxes, labeled Enc_{C_zk}(ξ_i, r_i)) feed into a joint-constraint node at the bottom that evaluates ⟨m, sl(st)⟩ + Σ ⟨ξ_i, u_i⟩ and asserts equality with the public target μ. The explicit instance (μ, st, (u_i)) sits to the right of the constraint node as the verifier-side input."
-/>
+That's the **committed sumcheck relation**, and the table shows why it needs a protocol: the constraint is about $\boldsymbol m$ and the $\boldsymbol \xi_i$, which live in $\mathsf{w}$. The verifier has $\mathsf{x}$ in the clear and $\mathsf{y}$ only as oracles, so evaluating the constraint directly is exactly what it cannot do.
 
 The "committed" in _committed sumcheck relation_ is doing real work: the implicit instance $\mathsf{y} = (f, (\xi_i))$ behaves like a commitment to the message _and_ the masks at the same time. Future protocols will accumulate more claims about this joint object; the masks travel with the protocol as oracles rather than being committed-and-opened once. Hold that thought — it's the central design decision that makes the sumcheck step work later.
 
@@ -221,53 +323,69 @@ The "committed" in _committed sumcheck relation_ is doing real work: the implici
 
 The whole construction is "compose small zero-knowledge pieces." So we need a definition of zero-knowledge that survives composition. The textbook one doesn't. Let's see exactly how it breaks, because the fix is one of the conceptual contributions of the paper.
 
+### What HVZK asks for
+
+**The view** is everything the verifier walks away with from one run — the prover's messages, its own coins, its oracle query answers — as a distribution, not a fixed string.
+
+**A simulator** is an efficient algorithm that manufactures a fake view from the public input alone, never the witness. The protocol is **zero-knowledge** if some simulator's output lands within $\zeta$ of the real view. The moral: _anything you could derive from the transcript, you could have derived alone_ — so it taught you nothing.
+
+The simulator never runs in the protocol; exhibiting one is just how the privacy claim gets discharged. You've already met one — §"Scaling up" closed with "sample $t$ uniform field elements."
+
+**Honest-verifier** restricts the guarantee to verifiers that sample challenges as specified. As noted up top, Fiat–Shamir makes that restriction free.
+
 ### IORs, briefly
 
 We are working with **interactive oracle reductions** (IORs), not IOPs. The difference: an IOR verifier doesn't output accept/reject — it outputs a new instance for some target relation $\mathcal R'$. The instance is split: an _explicit_ part the next verifier receives as input, and an _implicit_ part the next verifier receives as an oracle. So an IOR from $\mathcal R$ to $\mathcal R'$ takes $(\mathsf{x}, \mathsf{y}, \mathsf{w}) \in \mathcal R$ and produces $(\mathsf{x}', \mathsf{y}', \mathsf{w}') \in \mathcal R'$ via an interaction. Composition stitches IORs end-to-end: $\mathsf{IOR}_1 \circ \mathsf{IOR}_2$ runs the first reduction, then runs the second on its output.
 
 This is the right abstraction for our purposes because the WHIR/Ligerito construction is a tower of reductions: sumcheck reduces interleaving to base, code-switching reduces big code to small code, repeat, finally land in a tiny instance you can check directly.
 
-### The standard HVZK definition
+### Where the standard definition looks — and where it doesn't
 
-The standard notion of HVZK for IOPPs says: there exists an efficient simulator $\mathsf{S}$ such that the simulated view $\mathsf{S}^{\mathsf{y}}(\mathsf{x})$ is statistically close to the real $\mathsf{View}(\mathbf{P}, \mathbf{V}, \mathsf{x}, \mathsf{y}, \mathsf{w})$, with the simulator allowed oracle access to the implicit instance $\mathsf{y}$ and a bounded query budget. Adapt this to IORs unchanged — and watch it shatter.
+For a protocol ending in accept/reject, §"What HVZK asks for" is the whole story. An IOR doesn't end: its verifier outputs a new instance, part of which is an **oracle handed to whatever runs next**.
+
+The standard definition audits the queries _this_ verifier made, and says nothing about the oracle passed on. That leaves somewhere to hide a leak — an oracle nobody has queried **yet**.
 
 ### The counterexample
 
-Build a relation $\mathcal R$ with instance-witness pairs $(\mathsf{x}, \mathsf{w})$, and a ternary target $\mathcal R' = \{(\mathsf{x}', \mathsf{y}', \mathsf{w}' = \bot) : (\mathsf{x}', \mathsf{y}') \in \mathcal R\}$. Now consider two trivially "HVZK" IORs:
+Let $\mathcal R$ be any relation and $\mathcal R'$ be "check membership in $\mathcal R$ directly" — same instances, empty witness slot. Two reductions:
 
-- **$\mathsf{IOR}_1$.** Prover sends $\mathsf{w}$ as an oracle. Verifier makes _no_ queries, then outputs the new instance $(\mathsf{x}', \mathsf{y}') := (\mathsf{x}, \mathsf{w})$. This is honestly an IOR from $\mathcal R$ to $\mathcal R'$ with perfect completeness and soundness. The verifier's view is _empty_ (zero queries), so it's trivially HVZK under the standard definition.
-- **$\mathsf{IOR}_2$.** Prover does nothing. Verifier queries the entire implicit instance $\mathsf{y}'$ and checks $(\mathsf{x}', \mathsf{y}') \in \mathcal R$. Also HVZK — the standard definition lets the simulator query the implicit instance to its heart's content.
+- **$\mathsf{IOR}_1$.** Prover sends the witness $\mathsf{w}$ as an oracle. Verifier queries _nothing_, then outputs $(\mathsf{x}', \mathsf{y}') := (\mathsf{x}, \mathsf{w})$. Complete and sound, and its view is empty — so a simulator that outputs nothing matches it perfectly. **HVZK.**
+- **$\mathsf{IOR}_2$.** Prover sends nothing. Verifier reads all of $\mathsf{y}'$ and checks $(\mathsf{x}', \mathsf{y}') \in \mathcal R$. Also **HVZK**: the standard definition hands the simulator the same oracle access the verifier has, so it reproduces that view exactly.
 
-Each piece passes the bar. Compose them: $\mathsf{IOR}_1 \circ \mathsf{IOR}_2$ has the prover send $\mathsf{w}$ as the implicit instance, and the second verifier queries the whole thing. **The verifier of the composed protocol learns the witness.** That is obviously not HVZK.
+Each clears the bar. Now compose: $\mathsf{IOR}_1$'s output oracle _is_ $\mathsf{w}$, and $\mathsf{IOR}_2$ reads it in full. **The composed verifier learns the witness.**
 
 <img
   src="/diagrams/zk-whir-ior-compose-leak.svg"
   alt="Two-box pipeline showing the composition leak: IOR_1 (left box) takes (x, w) and outputs implicit instance y' = w with zero verifier queries — marked HVZK. IOR_2 (right box) takes y' as an oracle and queries it in full — also marked HVZK. The seam between the boxes carries an arrow labeled 'w as oracle'; a dashed red arrow from IOR_2's queries reaches back through the seam and exfiltrates w to the verifier. Caption: each piece passes the standard definition; composition reveals the witness."
 />
 
-The bug is structural. Definition-as-stated says nothing about _what the next protocol does with the output implicit instance_. $\mathsf{IOR}_1$ has no problem with its own simulator (no queries to simulate); the harm only materializes when $\mathsf{IOR}_2$'s queries reach into the oracle $\mathsf{IOR}_1$ produced. The definition has a blind spot the moment you compose.
+Neither piece cheats. The leak lives in the seam: $\mathsf{IOR}_1$ is graded on queries it never makes, and $\mathsf{IOR}_2$ is graded on an oracle it is handed and told is fine.
 
-### The fix — distinguishers
+### The fix — put the future queries in the definition
 
-Strengthen the definition so the simulator is responsible for simulating not just the verifier's own queries, but also _future queries to the output implicit instance $\mathsf{y}'$_. Model those future queries with an oracle algorithm $\mathcal D$, called a **distinguisher**. An IOR is **HVZK with respect to $\mathcal D$** if there's a simulator $\mathsf{S}$ such that
+If the danger is what happens to the output oracle later, then later has to be part of the definition. Model "whatever will query my output oracle" as an algorithm $\mathcal D$ — a **distinguisher**, so called because it is the thing trying to tell a real view from a simulated one.
+
+The simulator must now produce the view **and** answer $\mathcal D$'s queries into the output oracle, still without the witness:
 
 $$
-\mathsf{S}^{\mathsf{y}, \mathcal D}(\mathsf{x}) \;\approx_\zeta\; \mathsf{View}(\mathbf P, \mathbf V, \mathcal D, \mathsf{x}, \mathsf{y}, \mathsf{w}),
+\mathsf{S}^{\mathsf{y}, \mathcal D}(\mathsf{x}) \;\approx_\zeta\; \mathsf{View}(\mathbf P, \mathbf V, \mathcal D, \mathsf{x}, \mathsf{y}, \mathsf{w}).
 $$
 
-where the simulator runs $\mathcal D$ as a black box (in particular it can run $\mathcal D(\mathsf{x}')$ to figure out what queries $\mathcal D$ would make and produce simulated answers).
+$\mathsf{S}$ may run $\mathcal D$ as a black box — execute it on the output instance to see which positions it wants, then invent consistent answers.
 
-When $\mathcal D$ is trivial — makes no queries — this collapses to the standard definition. The interesting cases pin $\mathcal D$ to specific classes; for our protocols we'll use $\mathfrak D^{\leq t}$, distinguishers making at most $t$ queries to the implicit instance.
+**Does it kill the counterexample?** Take $\mathcal D$ that reads the whole output oracle, exactly what $\mathsf{IOR}_2$ does. Now $\mathsf{IOR}_1$'s simulator has to produce every position of $\mathsf{y}' = \mathsf{w}$ knowing only $\mathsf{x}$ — that _is_ the witness, so it cannot. **$\mathsf{IOR}_1$ now fails**, which is the verdict we wanted. And when $\mathcal D$ queries nothing, it collapses back to the standard definition.
 
-### Composition
+In practice $\mathcal D$ is pinned to a class: $\mathfrak D^{\leq t}$, distinguishers making at most $t$ queries to the implicit instance.
 
-Under this definition, composition behaves. Informally:
+### Composition — which $\mathcal D$ do you pick?
 
-> **Composition theorem (Lemma 2.6 of the paper).** If $\mathsf{IOR}_2$ is HVZK with respect to $\mathcal D_2$ with simulator $\mathsf{S}_2$, and $\mathsf{IOR}_1$ is HVZK with respect to the distinguisher $\mathcal D_1 := \mathsf{S}_2$, then $\mathsf{IOR}_1 \circ \mathsf{IOR}_2$ is HVZK with errors adding: $\zeta_1 + \zeta_2$.
+Every IOR is now HVZK only _relative to_ some $\mathcal D$. Which one? The one that actually shows up next.
 
-The idea: the simulator for $\mathsf{IOR}_1$ uses $\mathsf{S}_2$ as its distinguisher — the only "future queries" that matter are the ones $\mathsf{IOR}_2$'s simulator will make. Statistical distances chain along the seam.
+> **Composition theorem (Lemma 2.6 of the paper).** If $\mathsf{IOR}_2$ is HVZK with respect to $\mathcal D_2$ with simulator $\mathsf{S}_2$, and $\mathsf{IOR}_1$ is HVZK with respect to $\mathcal D_1 := \mathsf{S}_2$, then $\mathsf{IOR}_1 \circ \mathsf{IOR}_2$ is HVZK with errors adding: $\zeta_1 + \zeta_2$.
 
-The practical upshot: every IOR we build will be HVZK with respect to a specific bounded distinguisher class, and that distinguisher class is exactly what's needed by whatever IOR is going to consume its output. The framework forces you to make the "future queries" explicit, which is exactly what the counterexample showed you have to do.
+Read $\mathcal D_1 := \mathsf{S}_2$ slowly, because it is the whole idea: **the next protocol's simulator becomes the previous protocol's distinguisher.** In the simulated world, $\mathsf{S}_2$ is the only thing that ever touches $\mathsf{IOR}_1$'s output oracle — so those are the only future queries $\mathsf{IOR}_1$ has to survive. The statistical errors chain along the seam and add.
+
+Each reduction we build is then proved HVZK against a bounded query class matching what the next stage will ask — the framework's contribution being that "what happens to this oracle later" gets written down instead of assumed.
 
 ## The HVZK sumcheck reduction
 
@@ -313,14 +431,63 @@ In English: folding the interleaved codeword gives you a valid base-code codewor
 
 We have an instance of $\mathcal R_{\mathcal C^{\equiv 2^k}, \mathcal C_{\mathsf{zk}}, \mathsf{sl}}$: a $2^k$-interleaved main oracle $f$, $n$ small mask oracles $(\xi_i)$, and a joint constraint with target $\mu$. The reduction outputs an instance of $\mathcal R_{\mathcal C, \mathcal C_{\mathsf{zk}}, \mathsf{sl}'}$ — same shape, but over the _base_ code $\mathcal C$, with a new succinct linear form $\mathsf{sl}'$ that encodes the fold.
 
-Operationally, the protocol does this:
+Operationally:
 
-1. **Prover commits to small per-round masks.** Sample $k$ small mask messages $\boldsymbol s_1, \dots, \boldsymbol s_k \in \mathbb F^{\ell_{\mathsf{zk}}}$ and encode each under $\mathcal C_{\mathsf{zk}}$ to get $k$ additional mask oracles $s_1, \dots, s_k$. Interpret each $\boldsymbol s_j$ as a univariate polynomial $\hat s_j(\mathsf X) := \sum_{l} (\boldsymbol s_j)_l \cdot \mathsf X^{l-1}$. Send a masked target $\tilde \mu \in \mathbb F$ designed so that, in the honest case, $\tilde \mu = \sum_{\boldsymbol b \in \{0,1\}^k} (\hat s_1(b_1) + \dots + \hat s_k(b_k))$.
-2. **Verifier sends batching scalar $\varepsilon \leftarrow \mathbb F$.**
-3. **Run a $k$-round sumcheck** on the claim
-   $$\sum_{\boldsymbol b \in \{0,1\}^k} \big(\hat s_1(b_1) + \dots + \hat s_k(b_k) + \varepsilon \cdot \hat G(\boldsymbol b)\big) \;=\; \tilde \mu + \varepsilon \cdot \mu,$$
-   where $\hat G(\boldsymbol b) := \big(\sum_{\boldsymbol a \in \{0,1\}^{\log \ell}} \hat{\boldsymbol m}(\boldsymbol b, \boldsymbol a) \cdot \mathsf{Fold}(\mathsf{sl}(\mathsf{st}), \boldsymbol b)[\boldsymbol a]\big) + \sum_i \langle \boldsymbol \xi_i, \boldsymbol u_i \rangle$ — i.e. the message-times-fold-of-the-coefficients piece, plus the old mask-constraint terms. Each round binds one boolean variable to a fresh field challenge $\gamma_j$; after $k$ rounds the verifier holds $\boldsymbol \gamma = (\gamma_1, \dots, \gamma_k)$.
-4. **Output the new instance.** The output target $\mu' := \hat s_k(\gamma_k)$, the output implicit instance is $(\mathsf{Fold}(f, \boldsymbol \gamma), (\xi_i), (s_j))$ — the folded main oracle plus the old masks plus the new sumcheck masks — and the output joint constraint, after some careful regrouping, is a fresh committed-sumcheck relation over the base code $\mathcal C$.
+<ProtocolStepper label="The reduction, step by step">
+
+  <div class="space-y-1 border-b border-neutral-200 dark:border-neutral-800 py-3 text-neutral-500 dark:text-neutral-400">
+    <div><span class="font-semibold text-neutral-900 dark:text-neutral-100">Prover</span> — knows $\boldsymbol m, \boldsymbol r$ and every $(\boldsymbol \xi_i, \boldsymbol r_i)$</div>
+    <div><span class="font-semibold text-neutral-900 dark:text-neutral-100">Verifier</span> — holds $\mu, \mathsf{st}, (\boldsymbol u_i)$, and reaches $f, (\xi_i)$ only by query</div>
+  </div>
+
+  <div data-step class="border-b border-neutral-200 dark:border-neutral-800 py-4">
+    <div class="mb-2 text-sm font-medium tracking-wide text-neutral-400 dark:text-neutral-500">Step 1 &nbsp;·&nbsp; Prover</div>
+    Sample $k$ small masks $\boldsymbol s_1, \dots, \boldsymbol s_k \in \mathbb F^{\ell_{\mathsf{zk}}}$ and encode each under $\mathcal C_{\mathsf{zk}}$. Read each as a univariate $\hat s_j$, and set the masked target so the mask half sums correctly on its own:
+
+$$
+\tilde\mu \;:=\; \sum_{\boldsymbol b \in \{0,1\}^k} \big(\hat s_1(b_1) + \dots + \hat s_k(b_k)\big)
+$$
+
+    <div class="mt-3 flex items-baseline gap-2.5 text-neutral-600 dark:text-neutral-300"><span class="shrink-0 text-neutral-400 dark:text-neutral-600">→</span><span>mask oracles $s_1, \dots, s_k$, and the masked target $\tilde\mu$</span></div>
+  </div>
+
+  <div data-step class="border-b border-neutral-200 dark:border-neutral-800 py-4">
+    <div class="mb-2 text-sm font-medium tracking-wide text-neutral-400 dark:text-neutral-500">Step 2 &nbsp;·&nbsp; Verifier</div>
+    Draw one scalar to fuse the mask claim and the real claim into a single sumcheck. Because $\varepsilon$ is random, the fused claim can hold only if both halves do, bar probability $1/|\mathbb F|$.
+    <div class="mt-3 flex items-baseline gap-2.5 text-neutral-600 dark:text-neutral-300"><span class="shrink-0 text-neutral-400 dark:text-neutral-600">←</span><span>batching scalar $\varepsilon \leftarrow \mathbb F$</span></div>
+  </div>
+
+  <div data-step class="border-b border-neutral-200 dark:border-neutral-800 py-4">
+    <div class="mb-2 text-sm font-medium tracking-wide text-neutral-400 dark:text-neutral-500">Step 3 &nbsp;·&nbsp; Both, for $k$ rounds</div>
+    Both sides now hold one claim, and sumcheck it:
+
+$$
+\sum_{\boldsymbol b \in \{0,1\}^k} \big(\hat s_1(b_1) + \dots + \hat s_k(b_k) \;+\; \varepsilon \cdot \hat G(\boldsymbol b)\big) \;=\; \underbrace{\tilde \mu + \varepsilon \cdot \mu}_{c_0}
+$$
+
+    <div class="text-neutral-500 dark:text-neutral-400">where $\hat G(\boldsymbol b) := \big(\sum_{\boldsymbol a} \hat{\boldsymbol m}(\boldsymbol b, \boldsymbol a) \cdot \mathsf{Fold}(\mathsf{sl}(\mathsf{st}), \boldsymbol b)[\boldsymbol a]\big) + \sum_i \langle \boldsymbol \xi_i, \boldsymbol u_i \rangle$ — the message against the folded coefficients, plus the old mask terms.</div>
+
+    <div class="mt-3 border-l-2 border-neutral-200 dark:border-neutral-800 pl-4">
+      <div class="text-sm font-medium tracking-wide text-neutral-400 dark:text-neutral-500">each round $j$, carrying a running claim $c_{j-1}$</div>
+      <div class="mt-3 flex items-baseline gap-2.5 text-neutral-600 dark:text-neutral-300"><span class="shrink-0 text-neutral-400 dark:text-neutral-600">→</span><span>round polynomial $g_j$, the sum with $\mathsf X_j$ left free</span></div>
+      <div class="mt-1.5 text-neutral-500 dark:text-neutral-400">verifier checks $g_j(0) + g_j(1) = c_{j-1}$</div>
+      <div class="mt-3 flex items-baseline gap-2.5 text-neutral-600 dark:text-neutral-300"><span class="shrink-0 text-neutral-400 dark:text-neutral-600">←</span><span>challenge $\gamma_j \leftarrow \mathbb F$, then $c_j := g_j(\gamma_j)$</span></div>
+    </div>
+
+    <div class="mt-3 text-neutral-500 dark:text-neutral-400">After $k$ rounds the verifier holds $\boldsymbol \gamma = (\gamma_1, \dots, \gamma_k)$ and a final claim $c_k$ about a single point.</div>
+  </div>
+
+  <div data-step class="py-4">
+    <div class="mb-2 text-sm font-medium tracking-wide text-neutral-400 dark:text-neutral-500">Step 4 &nbsp;·&nbsp; Verifier</div>
+    Output the new instance — same shape, now over the base code $\mathcal C$:
+    <div class="mt-2 space-y-1 text-neutral-500 dark:text-neutral-400">
+      <div><span class="mr-2 inline-block w-20 text-neutral-400 dark:text-neutral-600">target</span> $\mu' := \hat s_k(\gamma_k)$</div>
+      <div><span class="mr-2 inline-block w-20 text-neutral-400 dark:text-neutral-600">oracles</span> $\mathsf{Fold}(f, \boldsymbol \gamma)$, the old $(\xi_i)$, the new $(s_j)$</div>
+      <div><span class="mr-2 inline-block w-20 text-neutral-400 dark:text-neutral-600">constraint</span> $c_k$ regrouped into a fresh joint constraint</div>
+    </div>
+  </div>
+
+</ProtocolStepper>
 
 After this single reduction, the problem size has dropped from $2^k \cdot m$ alphabet symbols to $m$ — the size of one base codeword.
 

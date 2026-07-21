@@ -1,0 +1,81 @@
+---
+interface Props {
+  label?: string;
+}
+
+const { label = "Walk the protocol" } = Astro.props;
+---
+
+<div class="not-prose my-8" data-stepper>
+  <div
+    class="flex flex-wrap items-baseline justify-between gap-x-4 gap-y-2 border-b border-neutral-200 pb-3 dark:border-neutral-800"
+  >
+    <span class="font-semibold">{label}</span>
+    <div class="flex items-baseline gap-3" data-controls hidden>
+      <span class="text-neutral-500 tabular-nums dark:text-neutral-400" data-counter
+      ></span>
+      <button
+        type="button"
+        data-prev
+        class="cursor-pointer underline decoration-neutral-300 underline-offset-4 hover:decoration-neutral-500 disabled:cursor-default disabled:text-neutral-300 disabled:no-underline dark:decoration-neutral-700 dark:hover:decoration-neutral-500 dark:disabled:text-neutral-700"
+        >Back</button
+      >
+      <button
+        type="button"
+        data-next
+        class="cursor-pointer underline decoration-neutral-300 underline-offset-4 hover:decoration-neutral-500 disabled:cursor-default disabled:text-neutral-300 disabled:no-underline dark:decoration-neutral-700 dark:hover:decoration-neutral-500 dark:disabled:text-neutral-700"
+        >Next</button
+      >
+      <button
+        type="button"
+        data-all
+        class="cursor-pointer text-neutral-500 underline decoration-neutral-300 underline-offset-4 hover:decoration-neutral-500 disabled:cursor-default disabled:text-neutral-300 disabled:no-underline dark:text-neutral-400 dark:decoration-neutral-700 dark:hover:decoration-neutral-500 dark:disabled:text-neutral-700"
+        >Show all</button
+      >
+    </div>
+  </div>
+
+  <div data-steps aria-live="polite"><slot /></div>
+</div>
+
+<script>
+  // Progressive enhancement: without JS every step is already visible.
+  document.querySelectorAll<HTMLElement>("[data-stepper]").forEach((root) => {
+    const steps = Array.from(root.querySelectorAll<HTMLElement>("[data-step]"));
+    if (steps.length < 2) return;
+
+    const controls = root.querySelector<HTMLElement>("[data-controls]")!;
+    const counter = root.querySelector<HTMLElement>("[data-counter]")!;
+    const prev = root.querySelector<HTMLButtonElement>("[data-prev]")!;
+    const next = root.querySelector<HTMLButtonElement>("[data-next]")!;
+    const all = root.querySelector<HTMLButtonElement>("[data-all]")!;
+
+    let shown = 1;
+
+    const render = () => {
+      steps.forEach((el, i) => {
+        el.hidden = i >= shown;
+      });
+      counter.textContent = `Step ${shown} of ${steps.length}`;
+      prev.disabled = shown === 1;
+      next.disabled = shown === steps.length;
+      all.disabled = shown === steps.length;
+    };
+
+    prev.addEventListener("click", () => {
+      shown = Math.max(1, shown - 1);
+      render();
+    });
+    next.addEventListener("click", () => {
+      shown = Math.min(steps.length, shown + 1);
+      render();
+    });
+    all.addEventListener("click", () => {
+      shown = steps.length;
+      render();
+    });
+
+    controls.hidden = false;
+    render();
+  });
+</script>
