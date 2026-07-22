@@ -6,6 +6,8 @@ pubDate: "2026-05-30"
 tags: ["zero-knowledge", "snarks", "iops", "whir"]
 ---
 
+import ProtocolStepper from "../../components/protocol-stepper.astro";
+
 ## Where Part 1 left us
 
 [Part 1](/writing/zk-whir-part-1) built the foundations of an HVZK IOPP for constrained interleaved codes:
@@ -53,9 +55,17 @@ That handles the randomness break. But the bigger break is structural: the WHIR-
 
 Quick recap (see the [WHIR post](/writing/whir) for the proper treatment). In the list-decoding regime — where the verifier picks a proximity parameter $\delta$ larger than the unique-decoding radius — multiple codewords in $\Lambda(\mathcal C, f, \delta)$ can be close to a malicious oracle $f$. The verifier needs a way to force the prover to commit to _one_ codeword, not a list.
 
-OOD sampling does this by an additional constraint. After the prover sends $f$, the verifier samples randomness $\rho \leftarrow D_{\mathsf{ze}}$, the prover sends a vector $\boldsymbol y := \mathsf{ze}(\rho) \cdot \boldsymbol f$ for a fixed function $\mathsf{ze} \colon D_{\mathsf{ze}} \to \mathbb F^{t_{\mathsf{ood}} \times \ell}$, and the verifier subsequently checks $\mathsf{ze}(\rho) \cdot \mathcal C^{-1}(f) = \boldsymbol y$. For appropriate $\mathsf{ze}$, with high probability over $\rho$ at most one codeword in $\Lambda(\mathcal C, f, \delta)$ satisfies this constraint. Once a single codeword is pinned, list-decoding-regime soundness becomes manageable.
+WHIR's version of the fix: the codewords are evaluations of low-degree polynomials, so the verifier sends a random point $z$ _outside_ the evaluation domain and the prover answers with a claimed value $\hat y$. Two distinct low-degree polynomials agree at a random point with probability at most $d/|\mathbb F|$, so with high probability at most one polynomial in the list is consistent with $(z, \hat y)$ — by answering, the prover has picked one. That's an **out-of-domain (OOD) sample**.
 
-Now look at $\boldsymbol y$. It's a linear function of the witness message $\boldsymbol m$ with $t_{\mathsf{ood}} \cdot \ell$ public coefficients. The prover sends it _in the clear_. **It leaks information about $\boldsymbol m$, hence about the witness.**
+The code-agnostic version abstracts the only property this used: evaluation at $z$ is a _linear function of the message_ — the inner product of the coefficient vector with $(1, z, z^2, \dots)$. So replace "evaluate at a random point" with "answer a random linear probe." The verifier samples randomness $\rho \leftarrow D_{\mathsf{ze}}$, which determines a public matrix $\mathsf{ze}(\rho) \in \mathbb F^{t_{\mathsf{ood}} \times \ell}$ ($\mathsf{ze}$ for _zero-evader_ — defined next section), and the prover answers
+
+$$
+\boldsymbol y \;:=\; \mathsf{ze}(\rho) \cdot \boldsymbol m \;\in\; \mathbb F^{t_{\mathsf{ood}}},
+$$
+
+$t_{\mathsf{ood}}$ random linear combinations of the message coordinates. The verifier's later checks enforce that the message it ends up trusting answers the probe with exactly $\boldsymbol y$. This pins one codeword for the same reason the random point did: two distinct list codewords have distinct messages, their difference is a fixed nonzero vector, and a random probe sends a fixed nonzero vector to $\boldsymbol 0$ only with small probability — so no two list elements share an answer, and $\boldsymbol y$ selects at most one.
+
+Now look at what the prover just sent: $t_{\mathsf{ood}}$ linear combinations of $\boldsymbol m$ with public coefficients, _in the clear_. **$\boldsymbol y$ leaks information about $\boldsymbol m$, hence about the witness.**
 
 And the leak is _inherent_. OOD is designed to uniquely identify the codeword (i.e., the witness). Zero-knowledge forbids revealing the witness. The two cannot literally coexist — you have to weaken one.
 
@@ -69,63 +79,129 @@ $$
 \boldsymbol y \;:=\; \mathsf{ze}(\rho) \cdot \begin{bmatrix} \boldsymbol m \\ \boldsymbol r \end{bmatrix},
 $$
 
-with the difference being that the linear function $\mathsf{ze}$ now mixes both the message and _freshly sampled_ randomness $\boldsymbol r \leftarrow \mathbb F^r$. The function $\mathsf{ze}$ is asked to satisfy two conditions:
+with the difference being that the probe now also covers _freshly sampled_ randomness $\boldsymbol r \leftarrow \mathbb F^r$ — not the encoding coins, new randomness whose only job is privacy. The function $\mathsf{ze}$ is asked to satisfy two conditions:
 
 1. **It's still a good OOD sample.** Equivalently, $\mathsf{ze}$ is a **zero-evader** [BCFW25]: for every nonzero vector $\boldsymbol v$,
    $$\Pr_{\rho \leftarrow D_{\mathsf{ze}}}\big[\mathsf{ze}(\rho) \cdot \boldsymbol v = \boldsymbol 0\big] \leq \varepsilon_{\mathsf{zero}}.$$
    I.e. the matrix $\mathsf{ze}(\rho)$ is, in expectation, full-rank enough to detect any nonzero input difference. This is what enables list-decoding-regime soundness.
-2. **It leaks no information about $\boldsymbol m$.** Formalized: $\mathsf{ze}$ is an **$(r, \zeta_{\mathsf{ze}})$-private zero-evader** — here $r \in \mathbb N$ is the number of fresh randomness coordinates absorbed into the OOD sample — if $(\boldsymbol y, \rho)$ can be efficiently simulated, with statistical error at most $\zeta_{\mathsf{ze}}$, _without_ knowing $\boldsymbol m$.
+2. **It leaks no information about $\boldsymbol m$.** Formalized: $\mathsf{ze}$ is an **$(r, \zeta_{\mathsf{ze}})$-private zero-evader** if $(\rho, \boldsymbol y)$ can be efficiently simulated, with statistical error at most $\zeta_{\mathsf{ze}}$, _without_ knowing $\boldsymbol m$.
 
-The two conditions look like they should pull in opposite directions: condition (1) wants $\mathsf{ze}(\rho)$ to depend richly on the input; condition (2) wants $\boldsymbol y$ to look uniform regardless of $\boldsymbol m$.
+Condition (2) sounds abstract; the construction that achieves it is not. Take any zero-evader and append $r$ columns sampled as a random rank-$t_{\mathsf{ood}}$ matrix $M \in \mathbb F^{t_{\mathsf{ood}} \times r}$:
 
-> **Lemma (informal, Lemma 2.13).** They don't. Any zero-evader $\mathsf{ze}$ with error $\varepsilon_{\mathsf{zero}}$ can be _extended_ — by absorbing $r$ extra randomness columns for any $r \in \mathbb N$ — to an $(r, 0)$-private zero-evader with approximately the same error. **Perfect privacy is achievable**, and private zero-evaders are plentiful.
+$$
+\mathsf{ze}'(\rho, M) := \big[\, \mathsf{ze}(\rho) \mid M \,\big], \qquad
+\boldsymbol y = \mathsf{ze}(\rho) \cdot \boldsymbol m + M \boldsymbol r.
+$$
 
-Intuitively: extra randomness in $\boldsymbol r$ gives the message-part of $\boldsymbol y$ a freshly random mask that doesn't affect zero-evasion. The OOD claim still pins a single message, but the corresponding $\boldsymbol y$ is uniform over $\mathbb F^{t_{\mathsf{ood}}}$ from the verifier's perspective.
+This is the surjectivity argument from Part 1's ZK encodings again: $M$'s columns span $\mathbb F^{t_{\mathsf{ood}}}$, so with $\boldsymbol r$ uniform, $M\boldsymbol r$ is uniform — a one-time pad on top of $\mathsf{ze}(\rho) \cdot \boldsymbol m$. Then $\boldsymbol y$ is uniform even conditioned on $(\rho, M)$, and the simulator just outputs a uniform $\boldsymbol y$. Zero-evasion survives: a nonzero $(\boldsymbol v, \boldsymbol w)$ with $\boldsymbol w \neq \boldsymbol 0$ is caught by the random $M$ except with probability $\tfrac{1}{|\mathbb F|^{t_{\mathsf{ood}}} - 1}$; with $\boldsymbol w = \boldsymbol 0$ it reduces to the original $\mathsf{ze}$.
 
-<img src="/diagrams/zk-whir-ood-vs-private-ood.svg" alt="Side-by-side comparison: left, non-ZK OOD computes y = ze(ρ) · m and ships y in the clear, leaking a linear function of the witness message; right, private-zero-evader OOD computes y = ze(ρ) · (m, r) by mixing m with freshly sampled randomness r, so y is uniform from the verifier's view while ze still pins a unique message." />
+> **Lemma (informal, Lemma 2.13; formally Lemma 9.3).** Any zero-evader with error $\varepsilon_{\mathsf{zero}}$ extends, for any $r \geq t_{\mathsf{ood}}$, to an $(r, 0)$-private zero-evader with error $\approx \varepsilon_{\mathsf{zero}}$. **Perfect privacy costs nothing.**
 
-### The crux: why the unique codeword still gets pinned
+<img
+  src="/diagrams/zk-whir-ood-vs-private-ood.svg"
+  alt="Side-by-side comparison: left, non-ZK OOD computes y = ze(ρ) · m and ships y in the clear, leaking a linear function of the witness message; right, private-zero-evader OOD computes y = ze(ρ) · (m, r) by mixing m with freshly sampled randomness r, so y is uniform from the verifier's view while ze still pins a unique message."
+/>
 
-Here's the subtlety that does the actual work — and the part the paper spends real care on.
+### What the constraint can — and can't — pin
 
-In the non-ZK OOD lemma of [BCFW25], the consistency $\mathsf{ze}(\rho) \cdot \mathcal C^{-1}(f) = \boldsymbol y$ pins a _unique codeword_ near $f$. But in the ZK setting, the encoding has redundancy: many distinct $(\boldsymbol m_i, \boldsymbol r_i)$ pairs encode to nearby codewords. We can no longer hope to pin a unique pair.
+Recall what the OOD constraint does with the list: a candidate codeword in $\Lambda(\mathcal C, f, \delta)$ _survives_ if its message answers the probe with $\boldsymbol y$. In the non-ZK world the encoding is a bijection — one message, one codeword — so "at most one surviving message" and "at most one surviving codeword" are the same statement, and [BCFW25] proves it.
 
-The paper's generalization of the lemma (Lemma 2.14) gives up that hope cleanly:
+A ZK encoding breaks the bijection. Decoding a candidate $\bar f \in \Lambda(\mathcal C, f, \delta)$ now yields a _pair_ $(\bar{\boldsymbol m}, \bar{\boldsymbol r}) = \mathsf{Enc}_{\mathcal C}^{-1}(\bar f)$ — message part and coins — and the probe is applied to the message part only. So list elements can differ in two ways, and the constraint treats them very differently:
 
-> **Lemma (informal, Lemma 2.14).** Allow _many_ pairs $(f_1, s_1), (f_2, s_2)$ near the original codewords to satisfy the OOD constraint $\mathsf{ze}(\rho) \cdot (\boldsymbol f_i, \boldsymbol s_i)^\top = \mathsf{ze}(\rho) \cdot (\boldsymbol f_j, \boldsymbol s_j)^\top$. But enforce that the _message parts_ must be equal: $\boldsymbol f_i = \boldsymbol f_j$ (and $\boldsymbol s_i = \boldsymbol s_j$) except with probability $|\Lambda(\mathcal C, \delta)|^2 \cdot |\Lambda(\mathcal C_{\mathsf{zk}}, \delta_{\mathsf{zk}})|^2 \cdot \varepsilon_{\mathsf{zero}}$.
+- **Same message, different coins.** Both answer the probe identically. Both survive — the constraint _cannot_ separate them. And it must not: privacy requires the honest codeword to be indistinguishable among all encodings of $\boldsymbol m$; a constraint that singled out one encoding would itself leak the coins.
+- **Different messages.** The message difference is a nonzero vector, and a zero-evader kills nonzero vectors: they share an answer with probability at most $\varepsilon_{\mathsf{zero}}$.
 
-This is the moment ZK and list-decoding stop being in tension. In the non-ZK world we needed _the codeword_ to be unique to control soundness. In the ZK world, the codeword can't be unique (privacy demands it isn't), but its _message_ can be — and the message is what soundness actually cares about. The OOD constraint, restated against messages instead of codewords, lets us keep list-decoding-regime efficiency while making the actual encoded oracle a uniformly random sample from a large set.
+So the constraint partitions the list into classes — one per message — and with high probability at most one _class_ is consistent with $\boldsymbol y$. The message is pinned; which encoding of it sits near $f$ stays ambiguous. That is exactly the split we need: soundness pinned the thing it uses, privacy kept the thing it hides behind.
 
-**The proof is straightforward once you stare at it.** Fix distinct $(\boldsymbol f_1, \boldsymbol s_1), (\boldsymbol f_2, \boldsymbol s_2)$. If they agree as messages we're done. Otherwise the difference $(\boldsymbol f_1 - \boldsymbol f_2, \boldsymbol s_1 - \boldsymbol s_2)$ is a nonzero vector, and zero-evasion bounds the probability that $\mathsf{ze}(\rho)$ kills it by $\varepsilon_{\mathsf{zero}}$. Union-bound over the pairs in $\Lambda(\mathcal C, \delta) \times \Lambda(\mathcal C_{\mathsf{zk}}, \delta_{\mathsf{zk}})$.
+Why is a pinned message enough, when the non-ZK analysis pinned a codeword? Because "which codeword" was never the question. Everything downstream is a statement about the message: the predicate $\Phi(\boldsymbol m)$, consistency between $f$ and $g$ across the switch, the witness the extractor must output. The non-ZK proofs pinned the codeword only because there it was the same thing.
 
-<img src="/diagrams/zk-whir-lemma-2-14-equivalence.svg" alt="Equivalence-class diagram for Lemma 2.14: the product list Λ(C,δ) × Λ(C_zk, δ_zk) of nearby (codeword, mask) pairs is partitioned into colored classes by the underlying message; many distinct (f_i, s_i) pairs may satisfy the OOD constraint, but the lemma forces every satisfying pair into one message class, so soundness still pins the message even though the codeword is no longer unique." />
+Formally, stated for the joint probe over oracle-and-mask pairs:
+
+> **Lemma (informal, Lemma 2.14).** Take any two candidates $(\bar f_1, \bar s_1), (\bar f_2, \bar s_2)$ with $\bar f_i \in \Lambda(\mathcal C, f, \delta)$, $\bar s_i \in \Lambda(\mathcal C_{\mathsf{zk}}, s, \delta_{\mathsf{zk}})$ that answer the probe identically. Then their decoded message parts are equal, except with probability $\varepsilon_{\mathsf{zero}}$ for that fixed pair — and _some_ bad pair exists anywhere in the lists with probability at most $|\Lambda(\mathcal C, \delta)|^2 \cdot |\Lambda(\mathcal C_{\mathsf{zk}}, \delta_{\mathsf{zk}})|^2 \cdot \varepsilon_{\mathsf{zero}}$ over $\rho$. The coins are unconstrained.
+
+The proof is the union bound you'd guess: fix two candidates whose message parts differ, zero-evasion kills their difference except with probability $\varepsilon_{\mathsf{zero}}$, union over all pairs of list elements.
+
+<img
+  src="/diagrams/zk-whir-lemma-2-14-equivalence.svg"
+  alt="Equivalence-class diagram for Lemma 2.14: the product list Λ(C,δ) × Λ(C_zk, δ_zk) of nearby (codeword, mask) pairs is partitioned into colored classes by the underlying message; many distinct (f_i, s_i) pairs may satisfy the OOD constraint, but the lemma forces every satisfying pair into one message class, so soundness still pins the message even though the codeword is no longer unique."
+/>
 
 There's one last knot. The fresh randomness $\boldsymbol r$ must be _included_ in the code-switch claim too — otherwise the next round won't know about it. Padding $\boldsymbol r$ into $\mathcal C'$ would reintroduce the $2\times$ overhead we were just trying to avoid. The fix: a **joint OOD sample** of both $g$ and the mask $s$, treating the pair as one object. The committed sumcheck relation, with its accumulating joint constraint, is exactly the right vehicle for this — and the entire reason it was designed the way it was.
 
 ## The code-switch construction
 
-Putting all four pieces together — ZK-encoding-aware consistency, the joint OOD sample, the private zero-evader, and the committed sumcheck relation — gives the construction. At a high level it does the following.
-
-1. **Prover sends $g$ and $s$.** Honestly: $g := \mathsf{Enc}_{\mathcal C'}(\boldsymbol m, \boldsymbol r')$ — the same message under the smaller code, with fresh randomness $\boldsymbol r' \leftarrow \mathbb F^{r'}$. And $s := \mathsf{Enc}_{\mathcal C_{\mathsf{zk}}}((\boldsymbol s, \boldsymbol r), \boldsymbol r'')$ — a mask encoding additional fresh randomness $\boldsymbol s \in \mathbb F^{\ell_{\mathsf{zk}} - r}$ concatenated with the original randomness $\boldsymbol r$.
-2. **Verifier sends OOD randomness $\rho \leftarrow D_{\mathsf{ze}}$.**
-3. **Prover replies with $\boldsymbol y \in \mathbb F^{t_{\mathsf{ood}}}$.** Honestly: $\boldsymbol y := \mathsf{ze}(\rho) \cdot (\boldsymbol m, \boldsymbol r, \boldsymbol s)^\top$ — the joint OOD sample over message and both pieces of mask.
-4. **Verifier sends in-domain queries.** $x_1, \dots, x_t \leftarrow [m]$ for consistency, plus a batching scalar $\boldsymbol \varepsilon$.
-5. **Verifier reads $f(x_1), \dots, f(x_t)$** and combines everything into a new target
+Re-anchor what the IOR starts from, because everything below refers to it. The input is one committed-sumcheck claim over $(\mathcal C, \mathcal C_{\mathsf{zk}}, \mathsf{sl})$ — Part 1's relation:
 
 $$
-\mu' \;:=\; \mu + \sum_i \varepsilon_i \cdot y_i + \sum_{i, l} \varepsilon_{\dots} \cdot f(x_i)_l,
+f = \mathsf{Enc}_{\mathcal C}(\boldsymbol m, \boldsymbol r),
+\qquad
+\langle \boldsymbol m, \mathsf{sl}(\mathsf{st}) \rangle + \sum_i \langle \boldsymbol \xi_i, \boldsymbol u_i \rangle = \mu.
 $$
 
-producing a fresh committed-sumcheck instance over $(\mathcal C', \mathcal C_{\mathsf{zk}}, \mathsf{sl}')$ whose joint constraint pulls in:
+Concretely the verifier holds: the **oracle $f$**, hiding message $\boldsymbol m$ behind coins $\boldsymbol r$; the **mask oracles $\xi_i$** left behind by earlier rounds, hiding messages $\boldsymbol \xi_i$; and the **public data** — state $\mathsf{st}$, target $\mu$, and the coefficient vectors $\boldsymbol u_i$ each mask enters through. The output must be a claim of the _same shape_, one size smaller: a new oracle under $\mathcal C'$, one more mask, a new target $\mu'$, over $(\mathcal C', \mathcal C_{\mathsf{zk}}, \mathsf{sl}')$. That closure is what lets the step recurse.
 
-- the original main-oracle constraint, restated as a succinct linear form $\mathsf{sl}'$ evaluating to $\mathsf{Fold}(\mathsf{sl}(\mathsf{st}), \boldsymbol \gamma)$ at the right state,
-- the original mask-oracle constraints $\langle \boldsymbol \xi_i, \boldsymbol u_i \rangle$,
-- the joint OOD constraint $\sum_i \varepsilon_i \cdot \langle (\boldsymbol m, \boldsymbol r, \boldsymbol s), \mathsf{ze}_i(\rho) \rangle$,
-- the consistency constraints $\sum_{i, l} \varepsilon_{\dots} \cdot \langle (\boldsymbol m, \boldsymbol r), G_{\mathcal C}[x_{i, l}] \rangle$ derived from the generator-matrix split.
+The four pieces built so far — ZK-encoding-aware consistency, the joint OOD sample, the private zero-evader, and the committed sumcheck relation as the carrier — slot together like this:
 
-All four are linear in the underlying messages, so they pack into one joint constraint.
+<ProtocolStepper label="One round of recursion, step by step">
 
-<img src="/diagrams/zk-whir-code-switch-flow.svg" alt="Message-flow diagram for the code-switch IOR: prover sends g = Enc_{C'}(m, r') and mask s = Enc_{C_zk}((s, r), r''); verifier sends OOD randomness ρ; prover replies with joint OOD answer y = ze(ρ) · (m, r, s); verifier issues in-domain consistency queries x_1,…,x_t and batching scalars ε, reads f(x_i), and assembles μ' that bundles the original main-oracle constraint, the mask-oracle constraints, the joint OOD constraint, and the consistency constraints into the next committed sumcheck instance over (C', C_zk, sl')." />
+  <div class="space-y-1 border-b border-neutral-200 dark:border-neutral-800 py-3 text-neutral-500 dark:text-neutral-400">
+    <div><span class="font-semibold text-neutral-900 dark:text-neutral-100">Prover</span> — knows $\boldsymbol m, \boldsymbol r$, and will sample fresh randomness $\boldsymbol r', \boldsymbol s, \boldsymbol r''$</div>
+    <div><span class="font-semibold text-neutral-900 dark:text-neutral-100">Verifier</span> — holds $\mu, \mathsf{st}, (\boldsymbol u_i)$, and reaches $f, (\xi_i)$ only by query</div>
+  </div>
+
+  <div data-step class="border-b border-neutral-200 dark:border-neutral-800 py-4">
+    <div class="mb-2 text-sm font-medium tracking-wide text-neutral-400 dark:text-neutral-500">Step 1 &nbsp;·&nbsp; Prover</div>
+    Re-encode the _same_ message under the smaller code, with fresh coins: $g := \mathsf{Enc}_{\mathcal C'}(\boldsymbol m, \boldsymbol r')$. Then Part 1's mask-oracle move — a small committed codeword whose message enters the joint constraint — reused for a new job: commit $s := \mathsf{Enc}_{\mathcal C_{\mathsf{zk}}}((\boldsymbol s, \boldsymbol r), \boldsymbol r'')$, whose message is $f$'s old coins $\boldsymbol r$ padded with fresh randomness $\boldsymbol s$. The mask is how $\boldsymbol r$ reaches the next round <em>without</em> being padded into $\mathcal C'$ — the padding route was the $2\times$ dead end.
+    <div class="mt-3 flex items-baseline gap-2.5 text-neutral-600 dark:text-neutral-300"><span class="shrink-0 text-neutral-400 dark:text-neutral-600">→</span><span>new oracle $g$, mask oracle $s$</span></div>
+  </div>
+
+  <div data-step class="border-b border-neutral-200 dark:border-neutral-800 py-4">
+    <div class="mb-2 text-sm font-medium tracking-wide text-neutral-400 dark:text-neutral-500">Step 2 &nbsp;·&nbsp; Verifier</div>
+    Draw the OOD randomness. $\rho$ selects the public probe matrix $\mathsf{ze}(\rho)$ — the random-linear-probe generalization of WHIR's out-of-domain point, needed because we're in the list-decoding regime and must force one candidate out of $\Lambda(\mathcal C', g, \delta)$.
+    <div class="mt-3 flex items-baseline gap-2.5 text-neutral-600 dark:text-neutral-300"><span class="shrink-0 text-neutral-400 dark:text-neutral-600">←</span><span>OOD randomness $\rho \leftarrow D_{\mathsf{ze}}$</span></div>
+  </div>
+
+  <div data-step class="border-b border-neutral-200 dark:border-neutral-800 py-4">
+    <div class="mb-2 text-sm font-medium tracking-wide text-neutral-400 dark:text-neutral-500">Step 3 &nbsp;·&nbsp; Prover</div>
+    Answer the probe _jointly_ over everything the next round must pin — the message and both pieces of the mask's message:
+
+$$
+\boldsymbol y \;:=\; \mathsf{ze}(\rho) \cdot (\boldsymbol m, \boldsymbol r, \boldsymbol s)^\top \;\in\; \mathbb F^{t_{\mathsf{ood}}}
+$$
+
+    <div class="text-neutral-500 dark:text-neutral-400">$\mathsf{ze}$ is a private zero-evader: the fresh $\boldsymbol s$ inside the probe plays the one-time-pad role, so $\boldsymbol y$ is uniform and leaks nothing — yet by Lemma 2.14 it still pins the decoded message parts.</div>
+    <div class="mt-3 flex items-baseline gap-2.5 text-neutral-600 dark:text-neutral-300"><span class="shrink-0 text-neutral-400 dark:text-neutral-600">→</span><span>joint OOD answer $\boldsymbol y$</span></div>
+  </div>
+
+  <div data-step class="border-b border-neutral-200 dark:border-neutral-800 py-4">
+    <div class="mb-2 text-sm font-medium tracking-wide text-neutral-400 dark:text-neutral-500">Step 4 &nbsp;·&nbsp; Verifier</div>
+    Spot-check that $g$'s message really is $f$'s message: sample query positions on the old oracle, plus batching scalars. Random $\boldsymbol \varepsilon$ fuses many linear constraints into one — Part 1's batching move; the fused claim holds only if every piece does, bar $1/|\mathbb F|$.
+    <div class="mt-3 flex items-baseline gap-2.5 text-neutral-600 dark:text-neutral-300"><span class="shrink-0 text-neutral-400 dark:text-neutral-600">←</span><span>queries $x_1, \dots, x_t \leftarrow [m]$, batching $\boldsymbol \varepsilon$</span></div>
+  </div>
+
+  <div data-step class="py-4">
+    <div class="mb-2 text-sm font-medium tracking-wide text-neutral-400 dark:text-neutral-500">Step 5 &nbsp;·&nbsp; Verifier</div>
+    Read $f(x_1), \dots, f(x_t)$ — the only touches of the old oracle. By the generator split from earlier, each read $f(x) = \langle \boldsymbol m, G^{\mathrm{msg}}_{\mathcal C}[x] \rangle + \langle \boldsymbol r, G^{\mathrm{rnd}}_{\mathcal C}[x] \rangle$ is a linear constraint on $(\boldsymbol m, \boldsymbol r)$ — exactly the shape the joint constraint accepts. Assemble the output instance:
+    <div class="mt-2 space-y-1 text-neutral-500 dark:text-neutral-400">
+      <div><span class="mr-2 inline-block w-20 text-neutral-400 dark:text-neutral-600">target</span> $\mu' := \mu + \sum_i \varepsilon_i \cdot y_i + \sum_{i,l} \varepsilon_{\dots} \cdot f(x_i)_l$</div>
+      <div><span class="mr-2 inline-block w-20 text-neutral-400 dark:text-neutral-600">oracles</span> $g$, the old masks $(\xi_i)$, the new mask $s$</div>
+      <div><span class="mr-2 inline-block w-20 text-neutral-400 dark:text-neutral-600">constraint</span> one joint constraint over $(\mathcal C', \mathcal C_{\mathsf{zk}}, \mathsf{sl}')$, packing four linear pieces:</div>
+    </div>
+    <div class="mt-2 space-y-1 border-l-2 border-neutral-200 dark:border-neutral-800 pl-4 text-neutral-500 dark:text-neutral-400">
+      <div>the old main constraint $\langle \boldsymbol m, \mathsf{sl}(\mathsf{st}) \rangle$, carried by $\mathsf{sl}'$ with state $\mathsf{st}' := (\mathsf{st}, \boldsymbol \varepsilon, \rho, x_1, \dots, x_t)$</div>
+      <div>the carried mask constraints $\langle \boldsymbol \xi_i, \boldsymbol u_i \rangle$</div>
+      <div>the joint OOD constraint $\sum_i \varepsilon_i \cdot \langle (\boldsymbol m, \boldsymbol r, \boldsymbol s), \mathsf{ze}_i(\rho) \rangle$</div>
+      <div>the consistency reads $\sum_{i,l} \varepsilon_{\dots} \cdot \langle (\boldsymbol m, \boldsymbol r), G_{\mathcal C}[x_{i,l}] \rangle$</div>
+    </div>
+    <div class="mt-3 text-neutral-500 dark:text-neutral-400">Same shape, one size smaller — feed it back to step 1.</div>
+  </div>
+
+</ProtocolStepper>
+
+<img
+  src="/diagrams/zk-whir-code-switch-flow.svg"
+  alt="Message-flow diagram for the code-switch IOR: prover sends g = Enc_{C'}(m, r') and mask s = Enc_{C_zk}((s, r), r''); verifier sends OOD randomness ρ; prover replies with joint OOD answer y = ze(ρ) · (m, r, s); verifier issues in-domain consistency queries x_1,…,x_t and batching scalars ε, reads f(x_i), and assembles μ' that bundles the original main-oracle constraint, the mask-oracle constraints, the joint OOD constraint, and the consistency constraints into the next committed sumcheck instance over (C', C_zk, sl')."
+/>
 
 **A counterintuitive efficiency property:** the prover and verifier time of this code-switch are _independent of the starting code $\mathcal C$_. The dominant cost is the encoding under $\mathcal C'$ (the new, smaller code) and the verifier's computation of $\mu'$. The starting code's structure pushes through into the next relation's succinct linear form $\mathsf{sl}'$ — captured by a quantity $T_{\mathcal C}$ the paper calls the **code-switching friendliness** of $\mathcal C$ — but doesn't show up in this protocol's local cost. People reach for "the slow code makes the switch slow"; that's not what happens.
 
@@ -166,18 +242,18 @@ This is the parameter regime of WHIR ([ACFY25]) and Ligerito ([NA25]), with ZK e
 - **$O(m) + \widetilde O(\lambda)$** alphabet symbols sent by the prover; verifier makes $O(\lambda)$ queries.
 - **RBR knowledge soundness error $\leq 2^{-\lambda}$.**
 - **Perfect honest-verifier zero-knowledge** ($\zeta = 0$, thanks to RS having perfect ZK encodings with appended randomness).
-- Prover time and verifier time match the non-private WHIR/Ligerito up to $o(1)$.
+- Proof length and query complexity match the non-private WHIR/Ligerito up to $o(1)$ overhead.
 
 **This is the headline.** Theorem 2 plus the building blocks above _directly yield an HVZK variant of WHIR and Ligerito_ — a drop-in zero-knowledge replacement for the code-agnostic IOP family at $1 + o(1)$ overhead, in the list-decoding regime, with negligible RBR soundness error. The first such result.
 
 ### Comparison
 
-| Protocol | Overhead | Soundness regime | Code family | Verifier |
-| --- | --- | --- | --- | --- |
-| [BCL22] | $O(1)$ | Unique decoding | Any ZK code (tensor-style) | Polylog |
-| [RW24] | $1 + o(1)$ | Constant error only | ZK tensor codes (concrete: RS or tensor) | Polylog |
-| Naive ZK WHIR / Ligero-style | $\geq 2\times$ | List decoding | Reed–Solomon only | Sublinear / polylog |
-| **HVZK WHIR (this paper)** | $\mathbf{1 + o(1)}$ | **List decoding** | **Any $\mathbb F$-additive ZK code** | **Polylog** |
+| Protocol                     | Overhead            | Soundness regime    | Code family                              | Verifier            |
+| ---------------------------- | ------------------- | ------------------- | ---------------------------------------- | ------------------- |
+| [BCL22]                      | $O(1)$              | Unique decoding     | Any ZK code (tensor-style)               | Polylog             |
+| [RW24]                       | $1 + o(1)$          | Constant error only | ZK tensor codes                          | —                   |
+| Naive full-mask ZK WHIR      | $\geq 2\times$      | List decoding       | Reed–Solomon only                        | Sublinear / polylog |
+| **HVZK WHIR (this paper)**   | $\mathbf{1 + o(1)}$ | **List decoding**   | **Any $\mathbb F$-additive ZK code**     | **Polylog**         |
 
 The two rows that previously each owned one of these properties no longer dominate. This work is the first to put all four boxes ticked at once.
 
@@ -190,7 +266,7 @@ Backbone: an interleaved variant of [ACFY25]'s $\Sigma$-IOP for R1CS. Standard R
 - **R1CS witness masks.** Protect the matrix-vector products $A \cdot z$, $B \cdot z$, $C \cdot z$ from leaking. [BCL22] handles this by padding the R1CS instance with full-size random witness — $O(1)$ overhead. This paper uses sublinear masks instead — $o(1)$.
 - **Sumcheck masks.** Same as Part 1's §6 — small per-round masks accumulated into the joint constraint.
 
-Both mask types are syntactically identical from the relation's perspective — they propagate into an instance of $\mathcal R_{\mathcal C, \mathcal C_{\mathsf{zk}}, \mathsf{sl}}$ which our protocols can test in zero-knowledge end-to-end. Compose with Theorem 1 or Theorem 4 and you get an HVZK IOP for NP with linear-time prover, list-decoding soundness, and $o(1)$ overhead relative to the witness size — strictly improving on [BCL22]'s constant-overhead linear-prover protocol.
+Both mask types are syntactically identical from the relation's perspective — they propagate into an instance of $\mathcal R_{\mathcal C, \mathcal C_{\mathsf{zk}}, \mathsf{sl}}$ which our protocols can test in zero-knowledge end-to-end. Compose with Theorem 1 or Theorem 4 and you get an HVZK IOP for NP with list-decoding soundness and $o(1)$ overhead over sending a single interleaved codeword — where [BCL22] pays a constant factor and only reaches unique-decoding soundness.
 
 One honest caveat: the verifier here is _non-succinct_ on R1CS-side cost, because this paper deliberately does not employ holographic preprocessing (the way [BCL22] and [RW24] do). The IOPP itself remains polylog-verifier.
 

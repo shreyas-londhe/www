@@ -22,7 +22,7 @@ The state of the art on the zero-knowledge side has been bleak:
 
 None of the state-of-the-art code-agnostic IOPs provide zero-knowledge. That is the gap.
 
-[**Chiesa, Fenzi, and Weissenberg (Feb 2026)**](https://eprint.iacr.org/) close it. They present an honest-verifier zero-knowledge IOPP for constrained interleaved linear codes that:
+[**Chiesa, Fenzi, and Weissenberg (Feb 2026)**](https://eprint.iacr.org/2026/391) close it. They present an honest-verifier zero-knowledge IOPP for constrained interleaved linear codes that:
 
 - Works for **any** $\mathbb F$-additive code with a zero-knowledge encoding — fully code-agnostic.
 - Costs **$1 + o(1)$** in proof length and prover/verifier time relative to the non-private state of the art.
@@ -79,7 +79,7 @@ Length-4 word, but each "letter" is now a triple over $\Sigma$. Nothing was comb
 
 **Why relative distance is unchanged.** A position of $u$ is nonzero iff _any_ of the three stacked codewords is nonzero there. If $u \neq 0$ then some $v_i \neq 0$, and that $v_i$ alone already forces $\geq d = 3$ nonzero positions. So $d(\mathcal C^{\equiv 3}) \geq d$ — and taking $v_1$ minimum-weight with $v_2 = v_3 = 0$ shows it's exactly $d$. Block length is still 4, so $\delta = 3/4$, untouched.
 
-**The price is the alphabet.** $\Sigma \to \Sigma^3$, and in general $\Sigma \to \Sigma^K$. One query to an interleaved codeword returns $K$ base symbols, whether or not you wanted them — so a $q$-query test costs $qK$ field elements. That's what "precludes query-optimal IOPs" means: you cannot get the per-query cost below $K$.
+**The price is the alphabet.** $\Sigma \to \Sigma^3$, and in general $\Sigma \to \Sigma^K$. One query to an interleaved codeword returns $K$ base symbols, whether or not you wanted them — so a $q$-query test costs $qK$ base-alphabet symbols. That's what "precludes query-optimal IOPs" means: you cannot get the per-query cost below $K$.
 
 <img
   src="/diagrams/zk-whir-tensor-vs-interleave.svg"
@@ -287,7 +287,7 @@ $$
 
 That's a one-time pad on $\mu$. From the verifier's view $\mu$ is a uniform field element — it could correspond to _any_ value of the real projection, with the masks absorbing whatever offset is needed. Knowing $\mu$ leaks nothing about $\langle \boldsymbol m, \mathsf{sl}(\mathsf{st}) \rangle$.
 
-**Why the verifier can't unmask.** Reasonable worry: the verifier has oracle access to the mask codewords $\xi_i$. Could it just query them and reconstruct $\langle \boldsymbol \xi_i, \boldsymbol u_i \rangle$? No — and this is precisely why $\mathcal C_{\mathsf{zk}}$ is itself a ZK code. The same Vandermonde-style argument from §"Zero-knowledge encodings" applies: any $\leq t_{\mathsf{zk}}$ coordinates of $\xi_i$ are uniform over $\Sigma_{\mathsf{zk}}^{t_{\mathsf{zk}}}$ given only their positions, so the mask message $\boldsymbol \xi_i$ stays hidden behind the encoding the same way $\boldsymbol m$ stays hidden behind $f$. The ZK encoding on the mask side closes the loop.
+**Why the verifier can't unmask.** Reasonable worry: the verifier has oracle access to the mask codewords $\xi_i$. Could it just query them and reconstruct $\langle \boldsymbol \xi_i, \boldsymbol u_i \rangle$? No — and this is precisely why $\mathcal C_{\mathsf{zk}}$ is itself a ZK code. The same Vandermonde-style argument from §"Zero-knowledge encodings" applies: any $\leq t_{\mathsf{zk}}$ coordinates of $\xi_i$ can be simulated given only their positions, so the mask message $\boldsymbol \xi_i$ stays hidden behind the encoding the same way $\boldsymbol m$ stays hidden behind $f$. The ZK encoding on the mask side closes the loop.
 
 Putting both modifications together gives the relation we'll use for the rest of the article. Its data splits three ways — the standard IOR shape, made precise in §"IORs, briefly":
 
@@ -381,7 +381,7 @@ In practice $\mathcal D$ is pinned to a class: $\mathfrak D^{\leq t}$, distingui
 
 Every IOR is now HVZK only _relative to_ some $\mathcal D$. Which one? The one that actually shows up next.
 
-> **Composition theorem (Lemma 2.6 of the paper).** If $\mathsf{IOR}_2$ is HVZK with respect to $\mathcal D_2$ with simulator $\mathsf{S}_2$, and $\mathsf{IOR}_1$ is HVZK with respect to $\mathcal D_1 := \mathsf{S}_2$, then $\mathsf{IOR}_1 \circ \mathsf{IOR}_2$ is HVZK with errors adding: $\zeta_1 + \zeta_2$.
+> **Composition theorem (Lemma 2.6 of the paper).** If $\mathsf{IOR}_2$ is HVZK with respect to $\mathcal D_2$ with simulator $\mathsf{S}_2$, and $\mathsf{IOR}_1$ is HVZK with respect to $\mathcal D_1 := \mathsf{S}_2$ (running with its own distinguisher $\mathcal D_2$), then $\mathsf{IOR}_1 \circ \mathsf{IOR}_2$ is HVZK with respect to $\mathcal D_2$, with errors adding: $\zeta_1 + \zeta_2$.
 
 Read $\mathcal D_1 := \mathsf{S}_2$ slowly, because it is the whole idea: **the next protocol's simulator becomes the previous protocol's distinguisher.** In the simulated world, $\mathsf{S}_2$ is the only thing that ever touches $\mathsf{IOR}_1$'s output oracle — so those are the only future queries $\mathsf{IOR}_1$ has to survive. The statistical errors chain along the seam and add.
 
@@ -481,7 +481,7 @@ $$
     <div class="mb-2 text-sm font-medium tracking-wide text-neutral-400 dark:text-neutral-500">Step 4 &nbsp;·&nbsp; Verifier</div>
     Output the new instance — same shape, now over the base code $\mathcal C$:
     <div class="mt-2 space-y-1 text-neutral-500 dark:text-neutral-400">
-      <div><span class="mr-2 inline-block w-20 text-neutral-400 dark:text-neutral-600">target</span> $\mu' := \hat s_k(\gamma_k)$</div>
+      <div><span class="mr-2 inline-block w-20 text-neutral-400 dark:text-neutral-600">target</span> $\mu' := c_k = g_k(\gamma_k)$ — the running claim after the last round</div>
       <div><span class="mr-2 inline-block w-20 text-neutral-400 dark:text-neutral-600">oracles</span> $\mathsf{Fold}(f, \boldsymbol \gamma)$, the old $(\xi_i)$, the new $(s_j)$</div>
       <div><span class="mr-2 inline-block w-20 text-neutral-400 dark:text-neutral-600">constraint</span> $c_k$ regrouped into a fresh joint constraint</div>
     </div>
@@ -495,12 +495,12 @@ After this single reduction, the problem size has dropped from $2^k \cdot m$ alp
 
 This is where $1 + o(1)$ overhead is won. Prior zero-knowledge sumchecks ([CFS17], [BCL22], the binary-field variant [Dia25]) add a _full_ random polynomial of the same size as the message, then prove the original claim relative to it via a random linear combination. That doubles prover work — every operation has to be done on a $2\times$-sized object. It's a clean construction; it's also too expensive for our setting.
 
-This paper does it differently: **one small mask per sumcheck round, à la [XZZPS19]**, instead of a single full mask up front. Each mask oracle $s_j$ has size only $\ell_{\mathsf{zk}}$ (much smaller than $\ell$, the actual message size). With $k$ rounds and $\ell_{\mathsf{zk}} \ll \ell$, the total masking overhead is sublinear — exactly the $o(1)$ we want.
+This paper does it differently: **one small mask per sumcheck round, à la [XZZPS19]**, instead of a single full mask up front. Each mask's message is only $\ell_{\mathsf{zk}}$ field elements (much smaller than $\ell$, the actual message size), and its encoding a correspondingly short codeword. With $k$ rounds and $\ell_{\mathsf{zk}} \ll \ell$, the total masking overhead is sublinear — exactly the $o(1)$ we want.
 
 That's the high-level move. The non-trivial part is making it composable with the WHIR/Ligerito recursion. Three details earn their place:
 
 - **Masks travel as oracles, not opened evaluations.** [XZZPS19]'s zero-knowledge sumcheck reveals an evaluation of the mask polynomial at the end — and inside our framework that would reveal an evaluation of $\hat{\boldsymbol m}$, breaking ZK. We cannot afford that. Instead, the reduction _accumulates a claim about the masks_ into the next relation's joint constraint and carries the mask oracles forward. This is exactly the work the "committed" part of $\mathcal R_{\mathcal C, \mathcal C_{\mathsf{zk}}, \mathsf{sl}}$ was set up to do. Without the joint constraint in the relation, this sumcheck would not compose.
-- **$\mathsf{char}(\mathbb F) \neq 2$.** The HVZK argument requires the mask contribution to the sumcheck claim not to cancel via the random linear combination. Over fields of characteristic 2 it can, so we need $\mathsf{char}(\mathbb F) \neq 2$ for the masks to actually mask. A real instantiation constraint, but it doesn't bite for the fields the WHIR/Ligerito family cares about (Goldilocks, BabyBear, large primes).
+- **$\mathsf{char}(\mathbb F) \neq 2$.** The mask $s_j$'s contribution to round $j$'s polynomial enters scaled by $2^{k-j}$ — the number of hypercube points it's summed over. In characteristic 2 that factor vanishes for every round but the last, and the masks stop masking. A real instantiation constraint, but it doesn't bite for the fields the WHIR/Ligerito family cares about (Goldilocks, BabyBear, large primes).
 - **Correlating queries over the larger alphabet.** Round-by-round knowledge soundness wants a union bound over codewords at distance $\delta$ from the sent oracles. Naively, you'd "open up" the interleaved word $f$ into its $2^k$ base-code parts and union-bound each — leading to a union over $|\Lambda(\mathcal C, \delta)|^{2^k}$ events. That blows up the required field size to absurdity. The fix: analyze codewords _relative to the interleaved codes_ $\mathcal C^{\equiv 2^k}$ and $\mathcal C_{\mathsf{zk}}^{\equiv n+k}$ directly. Interleaving raises a code's list size by only a constant factor [GGR11], so the union bound stays modest. Operationally, the verifier's queries are _correlated_ across the $2^k$ stacked base-codewords — they all share the same position — and this correlation is the soundness lever. It also shrinks compiled argument size as a bonus, because correlated queries become a single Merkle path over the bigger alphabet rather than $2^k$ paths.
 
 ### What this buys us
